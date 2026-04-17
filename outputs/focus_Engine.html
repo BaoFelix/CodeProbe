@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CodeProbe — Engine Focus Report</title>
+<style>
+  :root {
+    --bg: #0d1117; --card-bg: #161b22; --border: #30363d;
+    --primary: #58a6ff; --danger: #f85149; --success: #3fb950;
+    --warning: #d29922; --text: #c9d1d9; --muted: #8b949e;
+    --accent: #1f6feb; --surface: #21262d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+         background: var(--bg); color: var(--text); line-height: 1.6; }
+  header { background: linear-gradient(135deg, #1f6feb 0%, #238636 100%);
+           color: #fff; padding: 2.5rem; text-align: center; }
+  header h1 { font-size: 1.8rem; margin-bottom: 0.3rem; font-weight: 600; }
+  header .meta { opacity: 0.8; font-size: 0.9rem; }
+  main { max-width: 900px; margin: 2rem auto; padding: 0 1.5rem; }
+  footer { text-align: center; padding: 2rem; color: var(--muted); font-size: 0.85rem;
+           border-top: 1px solid var(--border); }
+  section { margin-bottom: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-bottom: 1rem; padding-bottom: 0.5rem;
+       border-bottom: 1px solid var(--border); color: var(--primary); }
+  .card { background: var(--card-bg); border: 1px solid var(--border);
+          border-radius: 6px; padding: 1.2rem; margin-bottom: 1rem; }
+  .card h3 { font-size: 1rem; margin-bottom: 0.5rem; color: #f0f6fc; }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1rem; }
+  .stat-box { background: var(--card-bg); border: 1px solid var(--border);
+              border-radius: 6px; padding: 1rem; text-align: center; }
+  .stat-box .num { font-size: 2rem; font-weight: 700; color: var(--primary); }
+  .stat-box .label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase;
+                     letter-spacing: 0.05em; }
+  .tag { display: inline-block; background: var(--surface); padding: 0.15rem 0.5rem;
+         border-radius: 20px; font-size: 0.75rem; margin: 0.1rem; color: var(--text);
+         border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; margin: 0.5rem 0; }
+  th, td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th { background: var(--surface); font-weight: 600; font-size: 0.85rem; color: var(--muted);
+       text-transform: uppercase; letter-spacing: 0.05em; }
+  td { font-size: 0.9rem; }
+  .dep-level { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 3px;
+               font-size: 0.75rem; font-weight: 600; }
+  .lv0 { background: #1a3a2a; color: #3fb950; }
+  .lv1 { background: #1a2d4a; color: #58a6ff; }
+  .lv2 { background: #0d3321; color: #3fb950; }
+  .lv3 { background: #2d1b00; color: #d29922; }
+  .lv4 { background: #3d2800; color: #d29922; }
+  .lv5 { background: #3d1215; color: #f85149; }
+  .health-good { color: #3fb950; }
+  .health-warn { color: #d29922; }
+  .health-bad { color: #f85149; }
+  .action-item { background: var(--card-bg); border: 1px solid var(--border);
+                 border-radius: 6px; padding: 1rem 1.2rem; margin-bottom: 0.7rem; }
+  .action-item .priority { display: inline-block; padding: 0.15rem 0.6rem;
+                           border-radius: 3px; font-weight: 700; font-size: 0.8rem;
+                           margin-right: 0.5rem; }
+  .p-crit { background: #3d1215; color: #f85149; border: 1px solid #da3633; }
+  .p-warn { background: #2d1b00; color: #d29922; border: 1px solid #9e6a03; }
+  .p-info { background: #1a3a2a; color: #3fb950; border: 1px solid #238636; }
+  .action-desc { color: var(--muted); margin-top: 0.3rem; font-size: 0.85rem; }
+  .score-bad { background: #3d1215; color: #f85149; border: 1px solid #da3633; }
+  .score-warn { background: #2d1b00; color: #d29922; border: 1px solid #9e6a03; }
+  .score-good { background: #0d3321; color: #3fb950; border: 1px solid #238636; }
+  p { margin-bottom: 0.5rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CodeProbe — Focus: Engine</h1>
+  <p class="meta">Generated 2026-04-15 00:31 · Single-class deep analysis</p>
+</header>
+<main>
+<section>
+  <h2>Class Profile</h2>
+  <div class="stat-grid">
+    <div class="stat-box"><div class="num">4</div><div class="label">Methods</div></div>
+    <div class="stat-box"><div class="num">4</div><div class="label">Members</div></div>
+    <div class="stat-box"><div class="num">15</div><div class="label">Lines</div></div>
+    <div class="stat-box"><div class="num">0</div><div class="label">Outgoing Deps</div></div>
+    <div class="stat-box"><div class="num">2</div><div class="label">Incoming Deps</div></div>
+  </div>
+</section>
+<section>
+  <h2>Responsibility Analysis</h2>
+  <div class="card">
+    <h3>Actual Responsibilities</h3>
+    <p>Manages RPM | Manages throttle | Tracks running state | Tracks temperature | Controls ignition/shutdown</p>
+  </div>
+  <div class="card" style="border-left:3px solid var(--success)">
+    <h3>Ideal Responsibility (SRP Target)</h3>
+    <p>This class should only control the ignition and shutdown of the engine.</p>
+  </div>
+  <div class="card">
+    <h3>SRP Violations</h3>
+    <p>DescriptionTest | ChangeReasonTest | MethodGroupingTest</p>
+  </div>
+  <div class="card">
+    <h3>Extract Candidates</h3>
+    <p>RPMManagement -&gt; RPMController | ThrottleManagement -&gt; ThrottleController | StateTracking -&gt; EngineStateTracker</p>
+  </div>
+  <div class="card"><h3>Tags</h3><p><span class="tag">ControlIgnition | ManageRPM | ManageThrottle</span> </p></div>
+</section>
+<section>
+  <h2>Sin Diagnosis</h2>
+  <p style="color:var(--muted)">Design issues detected, sorted by &#x26A1; refactoring priority.</p>
+    <div class="action-item">
+    <span class="priority p-crit">GodClass</span>
+    <span style="color:var(--muted);font-size:0.8rem" title="GodClass = 50 boundary + 16 impact + 0 role">&#x26A1;66</span>
+    <span style="color:var(--muted);font-size:0.85rem"> &mdash; multiple unrelated responsibilities: RPM, throttle, running state, temperature, ignition/shutdown</span>
+    <div class="action-desc" style="color:var(--primary)">&#x2192; Split by change reason (vertical cut)</div>
+  </div>
+  <div class="action-item">
+    <span class="priority p-warn">AbstractionAbsence</span>
+    <span style="color:var(--muted);font-size:0.8rem" title="AbstractionAbsence = 30 boundary + 16 impact + 0 role">&#x26A1;46</span>
+    <span style="color:var(--muted);font-size:0.85rem"> &mdash; no interfaces for RPM/throttle control or state tracking</span>
+    <div class="action-desc" style="color:var(--primary)">&#x2192; Extract interface at dependency boundary (DIP)</div>
+  </div>
+
+</section>
+<section>
+  <h2>Dependencies</h2>
+  
+    <div class="card">
+    <h3>Incoming Dependencies (2)</h3>
+    <table>
+      <tr><th>Source</th><th>Level</th><th>Health</th></tr>
+      <tr><td>Dashboard</td><td><span class="dep-level lv1">Lv-1</span></td><td class="health-warn">Direct association between non-orchestrators (bypass?)</td></tr>
+<tr><td>Vehicle</td><td><span class="dep-level lv1">Lv-1</span></td><td class="health-good">Association via orchestrator</td></tr>
+
+    </table>
+  </div>
+</section>
+</main>
+<footer>
+  <p>Generated by CodeProbe v3.0 — focus mode</p>
+</footer>
+</body>
+</html>
