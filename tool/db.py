@@ -132,6 +132,46 @@ class DBManager:
                     full_analysis TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+
+                /* ── new entity-relationship model (Phase 1) ────────────
+                   Replaces classes/dependencies once the migration is
+                   complete. For now coexists with old tables; readers
+                   should prefer entities/relationships when both exist. */
+
+                CREATE TABLE IF NOT EXISTS entities (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind            TEXT NOT NULL,           -- class|struct|interface|enum|method|field|namespace
+                    name            TEXT NOT NULL,
+                    qualified_name  TEXT NOT NULL,
+                    parent_qname    TEXT,                    -- containing entity's qualified_name
+                    file_path       TEXT,
+                    start_line      INTEGER,
+                    end_line        INTEGER,
+                    signature       TEXT,                    -- method sig / field type / NULL
+                    attrs           TEXT DEFAULT '{}',       -- JSON
+                    UNIQUE(qualified_name, kind)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_entities_qname  ON entities(qualified_name);
+                CREATE INDEX IF NOT EXISTS idx_entities_parent ON entities(parent_qname);
+                CREATE INDEX IF NOT EXISTS idx_entities_kind   ON entities(kind);
+
+                CREATE TABLE IF NOT EXISTS relationships (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_qname    TEXT NOT NULL,           -- always resolved (source is ours)
+                    target_qname    TEXT,                    -- NULL when target is external
+                    target_name     TEXT NOT NULL,           -- always populated
+                    kind            TEXT NOT NULL,           -- depends|associates|implements|aggregates|composes|inherits|calls
+                    level           INTEGER NOT NULL,        -- 0..5
+                    evidence_file   TEXT,
+                    evidence_line   INTEGER,
+                    evidence_text   TEXT,
+                    attrs           TEXT DEFAULT '{}'        -- JSON
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_rel_source ON relationships(source_qname);
+                CREATE INDEX IF NOT EXISTS idx_rel_target ON relationships(target_qname);
+                CREATE INDEX IF NOT EXISTS idx_rel_kind   ON relationships(kind);
             """)
             conn.commit()
         finally:
@@ -382,3 +422,92 @@ class DBManager:
         """Delete architecture-level data (responsibilities + design proposals).
         Kept for backward compatibility with pipeline --from=arch."""
         self.delete_responsibilities()
+
+    # ─── Entity / Relationship API (Phase 1) ──────────────────────
+
+    def save_entities(self, entities):
+        """Bulk upsert entities. `entities` is an iterable of Entity dataclass.
+
+        Conflict on (qualified_name, kind) → row is replaced (idempotent
+        re-scans). Returns the number of rows written.
+        """
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            rows = [(e.kind, e.name, e.qualified_name, e.parent_qname,
+                     e.file_path, e.start_line, e.end_line,
+                     e.signature, e.attrs_json()) for e in entities]
+            cur.executemany("""
+                INSERT INTO entities (kind, name, qualified_name, parent_qname,
+                                       file_path, start_line, end_line,
+                                       signature, attrs)
+                VALUES (?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(qualified_name, kind) DO UPDATE SET
+                    name = excluded.name,
+                    parent_qname = excluded.parent_qname,
+                    file_path = excluded.file_path,
+                    start_line = excluded.start_line,
+                    end_line = excluded.end_line,
+                    signature = excluded.signature,
+                    attrs = excluded.attrs
+            """, rows)
+            conn.commit()
+            return len(rows)
+        finally:
+            conn.close()
+
+    def save_relationships(self, rels):
+        """Bulk insert relationships. Multiple edges between the same pair
+        with different `kind` are allowed (each piece of evidence is its
+        own row). Returns the number written."""
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            rows = [(r.source_qname, r.target_qname, r.target_name, r.kind,
+                     r.level, r.evidence_file, r.evidence_line,
+                     r.evidence_text, r.attrs_json()) for r in rels]
+            cur.executemany("""
+                INSERT INTO relationships (source_qname, target_qname, target_name,
+                                            kind, level, evidence_file,
+                                            evidence_line, evidence_text, attrs)
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, rows)
+            conn.commit()
+            return len(rows)
+        finally:
+            conn.close()
+
+    def get_entities(self, kind=None, parent_qname=None):
+        """Query entities, optionally filtered by kind and/or parent."""
+        sql = "SELECT * FROM entities WHERE 1=1"
+        params = []
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if parent_qname:
+            sql += " AND parent_qname = ?"
+            params.append(parent_qname)
+        sql += " ORDER BY qualified_name"
+        return self._query_all(sql, params)
+
+    def get_relationships(self, source_qname=None, kind=None):
+        sql = "SELECT * FROM relationships WHERE 1=1"
+        params = []
+        if source_qname:
+            sql += " AND source_qname = ?"
+            params.append(source_qname)
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        return self._query_all(sql, params)
+
+    def clear_graph(self):
+        """Wipe entities + relationships (called on re-scan)."""
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM relationships")
+            cur.execute("DELETE FROM entities")
+            conn.commit()
+        finally:
+            conn.close()
