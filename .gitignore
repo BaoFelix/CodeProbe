@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+outputs/*.db
+outputs/*.json
+outputs/*.html
