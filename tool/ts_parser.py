@@ -89,18 +89,19 @@ _CONTAINER_TYPES = ('namespace_definition', 'class_specifier', 'struct_specifier
 
 
 # ── Query 4: base classes (inheritance) ──────────────────────
-# Matches `class X : public Y` and `class X : public N::Y`.
-# We grab the child class def node so we can rebuild its qualified name,
-# and the base's name node (either bare type_identifier or qualified_identifier).
+# Matches `class X : public Y`, `class X : public N::Y`, and templated
+# bases `class X : public Base<Mutex>` (very common — policy/CRTP). The
+# base capture may be a type_identifier, a qualified_identifier, or a
+# template_type; template params are stripped when taking the short name.
 _BASE_CLASS_QUERY = Query(CPP, """
     (class_specifier
         name: (type_identifier) @child
         (base_class_clause
-            [(type_identifier) (qualified_identifier)] @base)) @def
+            [(type_identifier) (qualified_identifier) (template_type)] @base)) @def
     (struct_specifier
         name: (type_identifier) @child
         (base_class_clause
-            [(type_identifier) (qualified_identifier)] @base)) @def
+            [(type_identifier) (qualified_identifier) (template_type)] @base)) @def
 """)
 
 
@@ -450,9 +451,9 @@ def parse_file(file_path):
 
         child_short = child_name_node.text.decode()
         base_text = base_name_node.text.decode()
-        # For qualified_identifier like `Foo::Bar`, the "short name"
-        # we use as the target_name is the last segment.
-        base_short = base_text.split('::')[-1]
+        # Strip template params, then take the last namespace segment:
+        #   spdlog::sinks::base_sink<Mutex> → base_sink
+        base_short = base_text.split('<')[0].split('::')[-1].strip()
 
         # Source class qualified_name: rebuild via tree walk
         full_parent = _enclosing_container_qname(def_node, _CONTAINER_TYPES)

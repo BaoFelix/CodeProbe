@@ -118,6 +118,62 @@ def classify_utility(g, n):
     return in_deg >= 2 and out_deg == 0 and reach == 0
 
 
+# ── Abstraction folding: a base represents its implementers ───
+
+def _representative_map(g):
+    """Map each class to the top-most abstract base / interface it
+    inherits or implements. Concrete implementations (tcp_sink,
+    a_formatter, …) fold onto their family's base (sink, flag_formatter).
+    """
+    parent = {}
+    for u, v, d in g.edges(data=True):
+        if d.get('kinds', set()) & {'implements', 'inherits'}:
+            parent[u] = v        # u is-a v
+    rep = {}
+    for n in list(parent):
+        cur, seen = n, {n}
+        while cur in parent and parent[cur] not in seen:
+            cur = parent[cur]
+            seen.add(cur)
+        rep[n] = cur
+    return rep
+
+
+def fold_abstractions(g):
+    """Collapse each implementation onto its base so a family of subtypes
+    is represented by one node. The base absorbs its implementers'
+    outgoing structure — i.e. 'the sink subsystem depends on …'. This
+    removes the swarm of in-degree-0 polymorphic leaves that would
+    otherwise look like independent workflow roots.
+
+    Returns (folded_graph, rep_map). Each folded node carries a 'members'
+    set listing the originals it represents.
+    """
+    rep = _representative_map(g)
+    R = lambda n: rep.get(n, n)
+
+    h = nx.DiGraph()
+    for n in g.nodes:
+        r = R(n)
+        if not h.has_node(r):
+            h.add_node(r, **g.nodes.get(r, {}))
+        h.nodes[r].setdefault('members', set()).add(n)
+
+    for u, v, d in g.edges(data=True):
+        ru, rv = R(u), R(v)
+        if ru == rv:
+            continue             # the is-a edge we just folded away
+        if h.has_edge(ru, rv):
+            data = h[ru][rv]
+            data['weight'] = max(data['weight'], d['weight'])
+            data['kinds'] |= set(d['kinds'])
+            data['max_level'] = max(data['max_level'], d['max_level'])
+        else:
+            h.add_edge(ru, rv, weight=d['weight'], kinds=set(d['kinds']),
+                       max_level=d['max_level'])
+    return h, rep
+
+
 # ── SCC condensation: collapse cycles into cluster nodes ──────
 
 def condense(g):
