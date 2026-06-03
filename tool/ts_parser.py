@@ -164,30 +164,36 @@ def _refine_class_kinds(entities):
             e.kind = 'interface'          # pure interface
 
 
-# Export/visibility macros (SPDLOG_API, MYLIB_EXPORT, __declspec(...)) sit
-# between `class`/`struct` and the real class name. tree-sitter doesn't
-# expand macros, so `class SPDLOG_API logger {…}` mis-parses: SPDLOG_API
-# becomes the class name and the body is lost. We blank these tokens out
-# before parsing, replacing with equal-length spaces so line/column
-# offsets stay intact.
-_EXPORT_MACRO_RE = re.compile(
+# Export/visibility macros (SPDLOG_API, Standard_EXPORT, MYLIB_EXPORT,
+# __declspec(...)). tree-sitter doesn't expand macros, so they corrupt
+# parsing in two spots:
+#   `class SPDLOG_API logger {…}`  → macro stolen as the class name
+#   `Standard_EXPORT void Foo();`  → macro stolen as the return type
+# We blank these tokens out before parsing, replacing with equal-length
+# spaces so line/column offsets stay intact.
+
+# (1) macro sitting between class/struct and the real class name + body.
+_CLASS_MACRO_RE = re.compile(
     rb'\b(class|struct)\s+'
-    rb'(__declspec\s*\([^)]*\)\s+|[A-Z][A-Z0-9_]{2,}\s+)'  # the macro
-    rb'(?=[A-Za-z_]\w*\s*[:{])'                              # followed by real name + body/base
+    rb'(__declspec\s*\([^)]*\)\s+|[A-Z][A-Z0-9_]{2,}\s+)'   # the macro
+    rb'(?=[A-Za-z_]\w*\s*[:{])'                              # real name + body/base
 )
+# (2) export/api macro tokens anywhere: identifiers ending in _EXPORT,
+# _API, _IMPORT, _DECL — these are almost always visibility macros.
+_TOKEN_MACRO_RE = re.compile(rb'\b[A-Za-z]\w*_(?:EXPORT|API|IMPORT|DECL|DLLAPI)\b')
 
 
 def _strip_export_macros(source: bytes) -> bytes:
-    """Blank out export macros so tree-sitter sees `class <name>`.
-    Only fires when an ALL-CAPS (or __declspec) token sits between the
-    keyword and ANOTHER identifier-then-body, which is unambiguously a
-    macro — a normal `class Foo {` or all-caps `class FOO {` (single
-    name) is left untouched.
+    """Blank export macros so tree-sitter sees clean declarations.
+    Equal-length space replacement preserves offsets. The class-position
+    rule only fires when a macro sits between the keyword and ANOTHER
+    name+body, so `class Foo {` / `class FOO {` (single name) are safe.
     """
-    def blank(m):
-        macro = m.group(2)
-        return m.group(1) + b' ' + (b' ' * len(macro))
-    return _EXPORT_MACRO_RE.sub(blank, source)
+    def blank_class(m):
+        return m.group(1) + b' ' + (b' ' * len(m.group(2)))
+    source = _CLASS_MACRO_RE.sub(blank_class, source)
+    source = _TOKEN_MACRO_RE.sub(lambda m: b' ' * len(m.group(0)), source)
+    return source
 
 
 # ── Field type classification ────────────────────────────────
@@ -294,7 +300,9 @@ def classify_field_type(type_str: str):
 
     if re.search(r'\bunique_ptr\s*<', s):
         return ('composes', _last_segment(core))
-    if re.search(r'\b(?:shared_ptr|weak_ptr)\s*<', s):
+    # shared_ptr / weak_ptr / OCCT occ::handle / Qt QSharedPointer etc.
+    # are reference-counted shared ownership → associates, like a pointer.
+    if re.search(r'\b(?:shared_ptr|weak_ptr|handle|intrusive_ptr)\s*<', s, re.IGNORECASE):
         return ('associates', _last_segment(core))
     if re.search(r'\b(?:' + '|'.join(_CONTAINER_NAMES) + r')\s*<', s):
         return ('aggregates', _last_segment(core))
@@ -354,6 +362,12 @@ def parse_file(file_path):
     for _idx, caps in QueryCursor(_CONTAINER_QUERY).matches(root):
         def_node = caps['def'][0]
         name_node = caps['name'][0]
+        # Skip forward declarations (`class gp_Trsf;`): a real definition
+        # has a body. Without this they become phantom entities with no
+        # members that pollute the graph and resolution.
+        if (def_node.type in ('class_specifier', 'struct_specifier')
+                and def_node.child_by_field_name('body') is None):
+            continue
         short_name = name_node.text.decode()
         parent_qname = _enclosing_container_qname(def_node, _CONTAINER_TYPES)
         qualified_name = (f'{parent_qname}::{short_name}'
