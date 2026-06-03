@@ -26,7 +26,7 @@ def main():
     print("\n── coverage check ──")
     expected = {
         ('namespace', 'Garage'),
-        ('class',     'Garage::ILogger'),         # interface detection comes later
+        ('interface', 'Garage::ILogger'),         # pure interface: all methods pure-virtual, no fields
         ('struct',    'Garage::ToolSet'),
         ('class',     'Garage::Workshop'),
         ('class',     'Garage::Workshop::Receipt'),

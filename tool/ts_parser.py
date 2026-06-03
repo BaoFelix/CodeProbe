@@ -104,22 +104,63 @@ _BASE_CLASS_QUERY = Query(CPP, """
 """)
 
 
-def _looks_like_interface(short_name: str) -> bool:
-    """Convention-based interface check: name starts with I + uppercase.
-    Examples: ILogger ✓, IShape ✓, Iterator ✗, Image ✗.
-    Phase 3+ can replace this with a real check (all methods pure virtual).
-    """
-    return (len(short_name) >= 2
-            and short_name[0] == 'I'
-            and short_name[1].isupper())
-
-
 def _line_text(source: bytes, line_idx: int) -> str:
     """Return the full text of a line (0-indexed)."""
     try:
         return source.splitlines()[line_idx].decode(errors='replace').strip()
     except IndexError:
         return ''
+
+
+# ── Entity-kind refinement: interface vs abstract vs concrete ─
+# Decided by the actual shape of the class, not a naming convention:
+#   interface = has pure-virtual method(s), no data fields, and every
+#               method is pure-virtual or a destructor (e.g. ILogger).
+#   abstract  = has pure-virtual method(s) but also fields/concrete
+#               methods (e.g. spdlog's sink — an abstract base class).
+#   class/struct = no pure-virtual methods (concrete).
+
+_PURE_VIRTUAL_RE = re.compile(
+    r'\)\s*(?:const|noexcept|override|final|\s)*=\s*0\s*;?\s*$')
+
+
+def _is_pure_virtual(signature) -> bool:
+    """True only for a pure-virtual declaration: '= 0' appears after the
+    parameter list ')' and any cv/ref qualifiers, with no method body.
+
+    Guards against two false positives we hit on real code:
+      - default arguments:  void f(int x = 0);   ('=0' is inside the parens)
+      - inline body content: void f() { x = 0; }  ('=0' is in the body)
+    """
+    if not signature or '{' in signature:    # has a body → not pure
+        return False
+    return bool(_PURE_VIRTUAL_RE.search(signature))
+
+
+def _refine_class_kinds(entities):
+    """Re-tag class/struct entities as 'interface', and mark abstract
+    ones in attrs, based on their members. Mutates entities in place.
+    """
+    children = {}
+    for e in entities:
+        if e.parent_qname:
+            children.setdefault(e.parent_qname, []).append(e)
+
+    for e in entities:
+        if e.kind not in ('class', 'struct'):
+            continue
+        kids = children.get(e.qualified_name, [])
+        methods = [c for c in kids if c.kind == 'method']
+        fields = [c for c in kids if c.kind == 'field']
+        pure = [m for m in methods if _is_pure_virtual(m.signature)]
+        if not pure:
+            continue                      # concrete — leave as class/struct
+        e.attrs['abstract'] = True
+        impure = [m for m in methods
+                  if not _is_pure_virtual(m.signature)
+                  and not m.name.startswith('~')]
+        if not fields and not impure:
+            e.kind = 'interface'          # pure interface
 
 
 # Export/visibility macros (SPDLOG_API, MYLIB_EXPORT, __declspec(...)) sit
@@ -384,12 +425,22 @@ def parse_file(file_path):
             signature=type_text,
         ))
 
+    # Refine kinds now that all members are known: interface vs abstract
+    # vs concrete. Must happen before inheritance edges so we can tell
+    # implements from inherits by the base's abstractness.
+    _refine_class_kinds(entities)
+
     # ── relationships: inheritance ────────────────────────
     # Build a lookup of "short name → qualified_name" for same-file
     # target resolution (used to fill target_qname when possible).
     same_file_index = {e.name: e.qualified_name
                        for e in entities
                        if e.kind in ('class', 'struct', 'interface')}
+    # Short names of same-file abstract types (interface or ABC). An edge
+    # into one of these is `implements`; into a concrete class, `inherits`.
+    same_file_abstract = {e.name for e in entities
+                          if e.kind == 'interface'
+                          or e.attrs.get('abstract')}
 
     relationships = []
     for _idx, caps in QueryCursor(_BASE_CLASS_QUERY).matches(root):
@@ -408,7 +459,10 @@ def parse_file(file_path):
         source_qname = (f'{full_parent}::{child_short}'
                         if full_parent else child_short)
 
-        kind = 'implements' if _looks_like_interface(base_short) else 'inherits'
+        # Decide implements vs inherits from the base's actual shape.
+        # If the base is in another file we can't tell yet → provisional
+        # 'inherits', re-tagged in parse_project once kinds are global.
+        kind = 'implements' if base_short in same_file_abstract else 'inherits'
 
         relationships.append(Relationship(
             source_qname=source_qname,
@@ -631,6 +685,23 @@ def parse_project(root_dir, exclude_vendored=True):
         else:
             ambiguous_count += 1   # leave unresolved — too risky to guess
 
+    # ── re-tag inheritance edges using global abstractness ─
+    # parse_file could only judge same-file bases. Now that entity kinds
+    # are global, fix cross-file inheritance: a base that is an interface
+    # or abstract base class → implements; otherwise → inherits.
+    abstract_qnames = {e.qualified_name for e in all_entities
+                       if e.kind == 'interface' or e.attrs.get('abstract')}
+    retagged = 0
+    for rel in all_relationships:
+        if rel.kind not in ('inherits', 'implements'):
+            continue
+        if rel.target_qname is None:
+            continue
+        want = 'implements' if rel.target_qname in abstract_qnames else 'inherits'
+        if rel.kind != want:
+            rel.kind = want
+            retagged += 1
+
     return all_entities, all_relationships, {
         'files_parsed': sum(1 for p in root.rglob('*')
                             if p.is_file() and p.suffix in _CPP_EXTS),
@@ -641,4 +712,8 @@ def parse_project(root_dir, exclude_vendored=True):
         'aliases_known': len(alias_map),
         'alias_edges_expanded': alias_expanded,
         'alias_edges_dropped': alias_dropped,
+        'inheritance_retagged': retagged,
+        'interfaces': sum(1 for e in all_entities if e.kind == 'interface'),
+        'abstract_classes': sum(1 for e in all_entities
+                                if e.kind != 'interface' and e.attrs.get('abstract')),
     }
