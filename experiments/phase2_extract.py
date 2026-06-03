@@ -14,7 +14,7 @@ FILE = "test_src/Workshop.hxx"
 
 
 def main():
-    entities = parse_file(FILE)
+    entities, _ = parse_file(FILE)   # Phase 2 only cares about entities
     print(f"── tree-sitter found {len(entities)} entities ──\n")
     print(f"{'kind':10s} {'qualified_name':40s} parent / signature")
     print("-" * 100)

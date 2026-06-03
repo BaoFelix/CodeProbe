@@ -10,7 +10,7 @@ from pathlib import Path
 import tree_sitter_cpp
 from tree_sitter import Language, Parser, Query, QueryCursor
 
-from .model import Entity
+from .model import Entity, Relationship
 
 
 CPP = Language(tree_sitter_cpp.language())
@@ -87,13 +87,51 @@ def _enclosing_container_qname(node, container_types):
 _CONTAINER_TYPES = ('namespace_definition', 'class_specifier', 'struct_specifier')
 
 
-def parse_file(file_path):
-    """Parse a C++ file and return a list of Entity objects.
+# ── Query 4: base classes (inheritance) ──────────────────────
+# Matches `class X : public Y` and `class X : public N::Y`.
+# We grab the child class def node so we can rebuild its qualified name,
+# and the base's name node (either bare type_identifier or qualified_identifier).
+_BASE_CLASS_QUERY = Query(CPP, """
+    (class_specifier
+        name: (type_identifier) @child
+        (base_class_clause
+            [(type_identifier) (qualified_identifier)] @base)) @def
+    (struct_specifier
+        name: (type_identifier) @child
+        (base_class_clause
+            [(type_identifier) (qualified_identifier)] @base)) @def
+""")
 
-    Each entity gets its qualified_name and parent_qname filled in
-    based on lexical nesting: a class inside a namespace gets the
-    namespace prepended, a class inside a class gets the outer class
-    prepended, and so on.
+
+def _looks_like_interface(short_name: str) -> bool:
+    """Convention-based interface check: name starts with I + uppercase.
+    Examples: ILogger ✓, IShape ✓, Iterator ✗, Image ✗.
+    Phase 3+ can replace this with a real check (all methods pure virtual).
+    """
+    return (len(short_name) >= 2
+            and short_name[0] == 'I'
+            and short_name[1].isupper())
+
+
+def _line_text(source: bytes, line_idx: int) -> str:
+    """Return the full text of a line (0-indexed)."""
+    try:
+        return source.splitlines()[line_idx].decode(errors='replace').strip()
+    except IndexError:
+        return ''
+
+
+def parse_file(file_path):
+    """Parse a C++ file and return (entities, relationships).
+
+    Entities cover namespaces, classes, structs, methods, fields —
+    each with qualified_name and parent_qname filled in based on
+    lexical nesting.
+
+    Relationships so far cover inheritance (`inherits`) and interface
+    implementation (`implements`). Same-file targets get their
+    target_qname resolved; cross-file targets keep target_qname=None
+    and rely on a later project-wide resolve pass.
     """
     path = Path(file_path)
     source = path.read_bytes()
@@ -182,4 +220,40 @@ def parse_file(file_path):
             signature=type_text,
         ))
 
-    return entities
+    # ── relationships: inheritance ────────────────────────
+    # Build a lookup of "short name → qualified_name" for same-file
+    # target resolution (used to fill target_qname when possible).
+    same_file_index = {e.name: e.qualified_name
+                       for e in entities
+                       if e.kind in ('class', 'struct', 'interface')}
+
+    relationships = []
+    for _idx, caps in QueryCursor(_BASE_CLASS_QUERY).matches(root):
+        def_node = caps['def'][0]
+        child_name_node = caps['child'][0]
+        base_name_node = caps['base'][0]
+
+        child_short = child_name_node.text.decode()
+        base_text = base_name_node.text.decode()
+        # For qualified_identifier like `Foo::Bar`, the "short name"
+        # we use as the target_name is the last segment.
+        base_short = base_text.split('::')[-1]
+
+        # Source class qualified_name: rebuild via tree walk
+        full_parent = _enclosing_container_qname(def_node, _CONTAINER_TYPES)
+        source_qname = (f'{full_parent}::{child_short}'
+                        if full_parent else child_short)
+
+        kind = 'implements' if _looks_like_interface(base_short) else 'inherits'
+
+        relationships.append(Relationship(
+            source_qname=source_qname,
+            target_name=base_short,
+            target_qname=same_file_index.get(base_short),   # None if cross-file
+            kind=kind,
+            evidence_file=str(path),
+            evidence_line=def_node.start_point[0] + 1,
+            evidence_text=_line_text(source, def_node.start_point[0]),
+        ))
+
+    return entities, relationships
