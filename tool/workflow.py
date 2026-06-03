@@ -116,3 +116,91 @@ def classify_utility(g, n):
     out_deg = g.out_degree(n)
     reach = len(nx.descendants(g, n))
     return in_deg >= 2 and out_deg == 0 and reach == 0
+
+
+# ── SCC condensation: collapse cycles into cluster nodes ──────
+
+def condense(g):
+    """Tarjan SCC condensation → a DAG.
+
+    Returns (C, label) where C is the condensed DiGraph with integer
+    node ids, and label maps each id to a readable name: the lone
+    member's qualified_name, or a 'cluster(A, B, …)' tag for a real
+    strongly-connected component (size > 1). A cluster IS the circular-
+    dependency signal — a tight knot the user should see as one node.
+    """
+    C = nx.condensation(g)               # nodes carry a 'members' set
+    label = {}
+    for cid in C.nodes:
+        members = C.nodes[cid]['members']
+        if len(members) == 1:
+            label[cid] = next(iter(members))
+        else:
+            shorts = sorted(m.split('::')[-1] for m in members)
+            label[cid] = 'cluster(' + ', '.join(shorts) + ')'
+    return C, label
+
+
+# ── dominator tree: the responsibility hierarchy ─────────────
+
+def find_roots(C):
+    """Roots = condensed nodes nothing points to (in-degree 0). Each is
+    its own independent workflow story (multi-entry case)."""
+    return [n for n in C.nodes if C.in_degree(n) == 0]
+
+
+def dominator_children(C, root):
+    """Build the immediate-dominator tree rooted at `root`.
+
+    Returns {parent_id: [child_id, …]} covering only nodes reachable
+    from root. A→B in this tree means 'every dependency path to B goes
+    through A' → B's responsibility belongs under A.
+    """
+    idom = nx.immediate_dominators(C, root)
+    children = {}
+    for node, parent in idom.items():
+        if node == parent:               # root dominates itself
+            continue
+        children.setdefault(parent, []).append(node)
+    return children
+
+
+def _subtree_weight(C, node):
+    """How much downstream work a condensed node owns — used for
+    within-layer ranking so shallow views surface the heaviest
+    responsibilities first."""
+    return len(nx.descendants(C, node))
+
+
+def responsibility_tree(C, label, root, max_depth=None):
+    """Walk the dominator tree from `root` to `max_depth`, ranking each
+    layer by subtree weight (heaviest first). Returns a nested dict:
+        {'label': str, 'children': [ ... ], 'truncated': int}
+    `truncated` = how many children were hidden by the depth cut.
+    """
+    children = dominator_children(C, root)
+
+    def build(node, depth):
+        kids = sorted(children.get(node, []),
+                      key=lambda c: _subtree_weight(C, c), reverse=True)
+        node_dict = {'label': label[node], 'children': [], 'truncated': 0}
+        if max_depth is not None and depth >= max_depth:
+            node_dict['truncated'] = len(kids)
+            return node_dict
+        for c in kids:
+            node_dict['children'].append(build(c, depth + 1))
+        return node_dict
+
+    return build(root, 0)
+
+
+def render_tree(node, indent=0):
+    """Pretty-print a responsibility_tree dict as indented text."""
+    lines = []
+    prefix = '  ' * indent + ('└─ ' if indent else '')
+    lines.append(f"{prefix}{node['label']}")
+    for child in node['children']:
+        lines.extend(render_tree(child, indent + 1))
+    if node['truncated']:
+        lines.append('  ' * (indent + 1) + f"▸ {node['truncated']} more…")
+    return lines
