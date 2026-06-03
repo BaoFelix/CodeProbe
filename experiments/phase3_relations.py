@@ -59,6 +59,8 @@ def main():
         ('Garage::Workshop', 'aggregates', 'Engine'),     # vector<Engine*>
         ('Garage::Workshop', 'associates', 'Engine'),     # Engine*
         ('Garage::Workshop', 'composes',   'ToolSet'),    # value type, same-file
+        # Phase 3c: depends from method signatures
+        ('Garage::Workshop', 'depends',    'Engine'),     # Repair(Engine& e)
     }
     missing = expected - got
     extra = got - expected

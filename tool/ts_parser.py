@@ -155,6 +155,36 @@ def _last_segment(qname: str) -> str:
     return qname.split('::')[-1]
 
 
+# Builtin keywords we should NOT treat as class references in
+# method signatures.
+_KEYWORDS = {'class', 'struct', 'const', 'static', 'virtual', 'override',
+             'final', 'noexcept', 'inline', 'explicit', 'mutable',
+             'volatile', 'extern', 'register', 'typename', 'template',
+             'public', 'private', 'protected', 'friend', 'return',
+             'if', 'else', 'for', 'while', 'switch', 'case'}
+
+
+def _type_names_in(node):
+    """Walk a subtree and yield identifier strings that look like
+    user-defined type names. Used to mine parameter and return types
+    for depends edges. Stops descending once a named type is found so
+    nested template args still get yielded one level at a time.
+    """
+    if node is None:
+        return
+    if node.type in ('type_identifier', 'qualified_identifier'):
+        text = node.text.decode()
+        name = text.split('::')[-1]
+        if (name and name[0].isupper()
+                and name not in _PRIMITIVES
+                and name not in _KEYWORDS):
+            yield name
+        # Don't descend — we have the name of this type
+        return
+    for child in node.children:
+        yield from _type_names_in(child)
+
+
 def classify_field_type(type_str: str):
     """Return (relation_kind, target_short_name) or None for primitives.
 
@@ -353,4 +383,45 @@ def parse_file(file_path):
             attrs={'via_field': e.name, 'type_text': e.signature},
         ))
 
+    # ── relationships: depends (method signature uses a type) ───
+    # Re-run the method query — we don't keep decl nodes on Entity.
+    # For each method, mine parameter types and the return type for
+    # user-defined names. Source of the edge = method's parent class.
+    seen_depends = set()  # dedupe (source_qname, target_name) per file
+    for _idx, caps in QueryCursor(_METHOD_IN_CLASS_QUERY).matches(root):
+        decl = caps['decl'][0]
+        parent = _enclosing_container_qname(decl, _CONTAINER_TYPES)
+        # Skip free functions (no enclosing class/struct)
+        if parent is None or not any(
+                a == 'class_specifier' or a == 'struct_specifier'
+                for a in _ancestor_types(decl)):
+            continue
+
+        # Mine names from the whole method declaration node — covers
+        # both return type (sibling of function_declarator) and
+        # parameter list (inside function_declarator → parameter_list).
+        for name in set(_type_names_in(decl)):
+            key = (parent, name)
+            if key in seen_depends:
+                continue
+            seen_depends.add(key)
+            relationships.append(Relationship(
+                source_qname=parent,
+                target_name=name,
+                target_qname=same_file_index.get(name),
+                kind='depends',
+                evidence_file=str(path),
+                evidence_line=decl.start_point[0] + 1,
+                evidence_text=_line_text(source, decl.start_point[0]),
+                attrs={'via': 'method_signature'},
+            ))
+
     return entities, relationships
+
+
+def _ancestor_types(node):
+    """Yield ancestor node types from `node` upward (excluding itself)."""
+    cur = node.parent
+    while cur is not None:
+        yield cur.type
+        cur = cur.parent
