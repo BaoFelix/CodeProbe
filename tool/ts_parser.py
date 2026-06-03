@@ -425,3 +425,73 @@ def _ancestor_types(node):
     while cur is not None:
         yield cur.type
         cur = cur.parent
+
+
+# ── Project-wide parsing & resolution ────────────────────────
+
+_CPP_EXTS = {'.h', '.hxx', '.hpp', '.cxx', '.cpp', '.c'}
+# .sch is intentionally NOT here — it's a private DSL and will use a
+# separate regex-based path (deferred).
+
+
+def parse_project(root_dir):
+    """Parse every C++ file under root_dir and return
+    (all_entities, all_relationships) with cross-file target_qname
+    resolved wherever possible.
+
+    Resolution rule: if a relationship's target_name appears exactly
+    once as the short name of some entity in the project, fill the
+    edge's target_qname. Skip resolution when the name is missing
+    (truly external, e.g. std types) or ambiguous (collides across
+    namespaces) — the edge stays unresolved.
+    """
+    root = Path(root_dir)
+    all_entities = []
+    all_relationships = []
+
+    for path in sorted(root.rglob('*')):
+        if not path.is_file() or path.suffix not in _CPP_EXTS:
+            continue
+        try:
+            entities, rels = parse_file(path)
+        except Exception as exc:
+            # Don't let one bad file kill the whole scan.
+            print(f"  ⚠ parse failed for {path}: {exc}")
+            continue
+        all_entities.extend(entities)
+        all_relationships.extend(rels)
+
+    # ── build global short-name → qualified_name index ───
+    # Only "container" entities are valid relationship targets
+    # (relationships point at classes/structs/interfaces, not at
+    # methods or fields). A short name that maps to multiple distinct
+    # qnames is ambiguous → we don't resolve it.
+    index = {}              # short_name → set of qnames
+    for e in all_entities:
+        if e.kind not in ('class', 'struct', 'interface'):
+            continue
+        index.setdefault(e.name, set()).add(e.qualified_name)
+
+    # ── second pass: fill target_qname where unambiguous ─
+    resolved_count = 0
+    ambiguous_count = 0
+    for rel in all_relationships:
+        if rel.target_qname is not None:
+            continue   # already resolved (same-file)
+        candidates = index.get(rel.target_name)
+        if not candidates:
+            continue   # truly external (e.g. std types)
+        if len(candidates) == 1:
+            rel.target_qname = next(iter(candidates))
+            resolved_count += 1
+        else:
+            ambiguous_count += 1   # leave unresolved — too risky to guess
+
+    return all_entities, all_relationships, {
+        'files_parsed': sum(1 for p in root.rglob('*')
+                            if p.is_file() and p.suffix in _CPP_EXTS),
+        'entities': len(all_entities),
+        'relationships': len(all_relationships),
+        'resolved_cross_file': resolved_count,
+        'ambiguous_unresolved': ambiguous_count,
+    }
