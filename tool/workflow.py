@@ -13,6 +13,8 @@ Pipeline:
 Everything rides on networkx primitives; we supply the judgement
 (weights, signatures, thresholds), not the algorithms.
 """
+from collections import Counter
+
 import networkx as nx
 
 from .model import LEVEL_OF
@@ -120,15 +122,41 @@ def classify_utility(g, n):
 
 # ── Abstraction folding: a base represents its implementers ───
 
-def _representative_map(g):
-    """Map each class to the top-most abstract base / interface it
-    inherits or implements. Concrete implementations (tcp_sink,
-    a_formatter, …) fold onto their family's base (sink, flag_formatter).
-    """
+def _parent_map(g):
+    """Direct is-a parent for each class: the first inherits/implements
+    target. (Multiple inheritance keeps the first base.)"""
     parent = {}
     for u, v, d in g.edges(data=True):
         if d.get('kinds', set()) & {'implements', 'inherits'}:
-            parent[u] = v        # u is-a v
+            parent.setdefault(u, v)
+    return parent
+
+
+def _representative_map(g, mode='leaves'):
+    """Map each class to the node that represents it after folding.
+
+    mode='none'   → {} : no folding, every class stays itself.
+    mode='leaves' → fold only leaf classes (nothing inherits from them)
+                    into their *immediate* parent, preserving the
+                    intermediate taxonomy (Geom_Curve, Geom_Conic stay).
+    mode='all'    → fold every class onto its top-most base (Geom_Circle
+                    → Geom_Geometry). Good for shallow polymorphic code,
+                    too aggressive for deep type hierarchies.
+    """
+    if mode == 'none':
+        return {}
+    parent = _parent_map(g)
+    if mode == 'leaves':
+        has_children = set(parent.values())
+        # Only fold into a base that is a real polymorphic family
+        # (≥2 subclasses). A base with a single implementer isn't a
+        # family — folding would bury a substantial class (e.g. an
+        # orchestrator that merely implements one interface) into a
+        # marginal base.
+        child_count = Counter(parent.values())
+        return {child: par for child, par in parent.items()
+                if child not in has_children and child_count[par] >= 2}
+    # mode == 'all'
     rep = {}
     for n in list(parent):
         cur, seen = n, {n}
@@ -139,17 +167,20 @@ def _representative_map(g):
     return rep
 
 
-def fold_abstractions(g):
-    """Collapse each implementation onto its base so a family of subtypes
-    is represented by one node. The base absorbs its implementers'
-    outgoing structure — i.e. 'the sink subsystem depends on …'. This
-    removes the swarm of in-degree-0 polymorphic leaves that would
-    otherwise look like independent workflow roots.
+def fold_abstractions(g, mode='leaves'):
+    """Collapse subtypes onto a representative base so a family of
+    implementations shows as one node that absorbs their outgoing
+    structure. Removes the swarm of in-degree-0 polymorphic leaves that
+    would otherwise look like independent workflow roots.
+
+    mode (see _representative_map): 'leaves' (default) folds only leaf
+    classes one level up — the sweet spot that cleans up polymorphic
+    code while keeping deep type taxonomies intact.
 
     Returns (folded_graph, rep_map). Each folded node carries a 'members'
     set listing the originals it represents.
     """
-    rep = _representative_map(g)
+    rep = _representative_map(g, mode)
     R = lambda n: rep.get(n, n)
 
     h = nx.DiGraph()
