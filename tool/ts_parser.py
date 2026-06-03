@@ -132,36 +132,107 @@ _PRIMITIVES = {'int', 'char', 'bool', 'short', 'long', 'float', 'double',
                'auto', 'wchar_t', 'int8_t', 'int16_t', 'int32_t', 'int64_t',
                'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'}
 
-_CONTAINER_NAMES = ('vector', 'list', 'deque', 'set', 'unordered_set',
-                    'map', 'unordered_map', 'array')
+# std utility wrappers that aren't a class dependency in themselves.
+# `function` is a callable (target is a lambda, not a class); the rest
+# are value/utility types we don't want to surface as relationships.
+_STD_NOISE = {'function', 'string', 'string_view', 'pair', 'tuple',
+              'initializer_list'}
 
-# Container with a pointer-bearing template arg → aggregates.
-# Match `vector<...X*...>` or `vector<...shared_ptr<X>...>`.
-_AGGREGATE_RE = re.compile(
-    r'(?:std::)?(?:' + '|'.join(_CONTAINER_NAMES) + r')\s*<\s*'
-    r'(?:.*?)([A-Z]\w+)\s*(?:\*|\s*>\s*$|\s*,)'
-)
-# Single class-name inside unique_ptr<...> → composes.
-_UNIQUE_RE = re.compile(r'(?:std::)?unique_ptr\s*<\s*([\w:]+)\s*\*?\s*>')
-# Single class-name inside shared_ptr<...> → associates.
-_SHARED_RE = re.compile(r'(?:std::)?shared_ptr\s*<\s*([\w:]+)\s*>')
-# Raw pointer to a non-primitive class → associates.
-_RAW_PTR_RE = re.compile(r'^\s*(?:const\s+)?([\w:]+)\s*\*\s*$')
-# Bare value-type identifier → composes (if not a primitive).
-_VALUE_RE = re.compile(r'^\s*(?:const\s+)?([\w:]+)\s*$')
+_CONTAINER_NAMES = ('vector', 'list', 'deque', 'set', 'unordered_set',
+                    'multiset', 'map', 'unordered_map', 'multimap', 'array')
+
+_SMART_PTRS = ('unique_ptr', 'shared_ptr', 'weak_ptr')
+
+# Builtin keywords we should NOT treat as class references.
+_KEYWORDS = {'class', 'struct', 'const', 'static', 'virtual', 'override',
+             'final', 'noexcept', 'inline', 'explicit', 'mutable',
+             'volatile', 'extern', 'register', 'typename', 'template',
+             'public', 'private', 'protected', 'friend', 'return',
+             'if', 'else', 'for', 'while', 'switch', 'case'}
 
 
 def _last_segment(qname: str) -> str:
     return qname.split('::')[-1]
 
 
-# Builtin keywords we should NOT treat as class references in
-# method signatures.
-_KEYWORDS = {'class', 'struct', 'const', 'static', 'virtual', 'override',
-             'final', 'noexcept', 'inline', 'explicit', 'mutable',
-             'volatile', 'extern', 'register', 'typename', 'template',
-             'public', 'private', 'protected', 'friend', 'return',
-             'if', 'else', 'for', 'while', 'switch', 'case'}
+def _last_top_level_arg(inner: str) -> str:
+    """Given the inside of a <...>, return the last comma-separated arg
+    at bracket depth 0. For map<K, V> this yields V (the value type),
+    which is the more interesting dependency."""
+    depth = 0
+    start = 0
+    args = []
+    for i, ch in enumerate(inner):
+        if ch in '<([':
+            depth += 1
+        elif ch in '>)]':
+            depth -= 1
+        elif ch == ',' and depth == 0:
+            args.append(inner[start:i])
+            start = i + 1
+    args.append(inner[start:])
+    return args[-1].strip() if args else inner.strip()
+
+
+def _innermost_type_name(s: str):
+    """Peel template args, pointers, refs, const, and namespaces down to
+    the core type identifier. Returns None if it bottoms out at a
+    primitive or std noise type. Does NOT require uppercase — a class is
+    'any identifier that isn't a known primitive/keyword'.
+    """
+    s = s.strip()
+    s = re.sub(r'^const\s+', '', s)
+    s = s.rstrip('*& ').strip()
+
+    # Templated: descend into the last top-level template argument.
+    m = re.search(r'<(.+)>', s)
+    if m:
+        return _innermost_type_name(_last_top_level_arg(m.group(1)))
+
+    name = s.split('::')[-1].strip().rstrip('*& ').strip()
+    if (not name
+            or name in _PRIMITIVES
+            or name in _KEYWORDS
+            or name in _STD_NOISE
+            or not re.match(r'^[A-Za-z_]\w*$', name)):
+        return None
+    return name
+
+
+def classify_field_type(type_str: str):
+    """Return (relation_kind, target_short_name) or None.
+
+    The KIND comes from the outermost wrapper; the TARGET comes from the
+    innermost class name (uppercase is NOT required).
+
+        'std::unique_ptr<Engine>'      → ('composes',   'Engine')
+        'FuelTank'                     → ('composes',   'FuelTank')
+        'std::vector<Engine*>'         → ('aggregates', 'Engine')
+        'std::vector<sink_ptr>'        → ('aggregates', 'sink_ptr')  # alias resolved later
+        'std::shared_ptr<sinks::sink>' → ('associates', 'sink')
+        'Engine*'                      → ('associates', 'Engine')
+        'int' / 'char*' / 'std::function<...>' → None
+    """
+    s = type_str.strip()
+
+    # std::function etc. — callable / utility, not a class dependency.
+    head = s.split('<')[0].split('::')[-1].strip()
+    if head in _STD_NOISE:
+        return None
+
+    core = _innermost_type_name(s)
+    if core is None:
+        return None
+
+    if re.search(r'\bunique_ptr\s*<', s):
+        return ('composes', _last_segment(core))
+    if re.search(r'\b(?:shared_ptr|weak_ptr)\s*<', s):
+        return ('associates', _last_segment(core))
+    if re.search(r'\b(?:' + '|'.join(_CONTAINER_NAMES) + r')\s*<', s):
+        return ('aggregates', _last_segment(core))
+    if s.rstrip().endswith('*'):
+        return ('associates', _last_segment(core))
+    return ('composes', _last_segment(core))
 
 
 def _type_names_in(node):
@@ -175,53 +246,17 @@ def _type_names_in(node):
     if node.type in ('type_identifier', 'qualified_identifier'):
         text = node.text.decode()
         name = text.split('::')[-1]
-        if (name and name[0].isupper()
+        # A class is any identifier that isn't a known primitive / keyword
+        # / std noise type — no uppercase requirement.
+        if (name
                 and name not in _PRIMITIVES
-                and name not in _KEYWORDS):
+                and name not in _KEYWORDS
+                and name not in _STD_NOISE):
             yield name
         # Don't descend — we have the name of this type
         return
     for child in node.children:
         yield from _type_names_in(child)
-
-
-def classify_field_type(type_str: str):
-    """Return (relation_kind, target_short_name) or None for primitives.
-
-    Examples:
-        'std::unique_ptr<Engine>' → ('composes',   'Engine')
-        'FuelTank'                → ('composes',   'FuelTank')
-        'std::vector<Engine*>'    → ('aggregates', 'Engine')
-        'Engine*'                 → ('associates', 'Engine')
-        'std::shared_ptr<X>'      → ('associates', 'X')
-        'int'                     → None
-        'char*'                   → None
-    """
-    s = type_str.strip()
-
-    m = _UNIQUE_RE.search(s)
-    if m:
-        return ('composes', _last_segment(m.group(1)))
-
-    m = _AGGREGATE_RE.search(s)
-    if m and _last_segment(m.group(1)) not in _PRIMITIVES:
-        return ('aggregates', _last_segment(m.group(1)))
-
-    m = _SHARED_RE.search(s)
-    if m:
-        return ('associates', _last_segment(m.group(1)))
-
-    m = _RAW_PTR_RE.match(s)
-    if m:
-        name = _last_segment(m.group(1))
-        return None if name in _PRIMITIVES else ('associates', name)
-
-    m = _VALUE_RE.match(s)
-    if m:
-        name = _last_segment(m.group(1))
-        return None if name in _PRIMITIVES else ('composes', name)
-
-    return None
 
 
 def parse_file(file_path):
