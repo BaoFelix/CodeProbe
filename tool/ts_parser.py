@@ -122,6 +122,32 @@ def _line_text(source: bytes, line_idx: int) -> str:
         return ''
 
 
+# Export/visibility macros (SPDLOG_API, MYLIB_EXPORT, __declspec(...)) sit
+# between `class`/`struct` and the real class name. tree-sitter doesn't
+# expand macros, so `class SPDLOG_API logger {…}` mis-parses: SPDLOG_API
+# becomes the class name and the body is lost. We blank these tokens out
+# before parsing, replacing with equal-length spaces so line/column
+# offsets stay intact.
+_EXPORT_MACRO_RE = re.compile(
+    rb'\b(class|struct)\s+'
+    rb'(__declspec\s*\([^)]*\)\s+|[A-Z][A-Z0-9_]{2,}\s+)'  # the macro
+    rb'(?=[A-Za-z_]\w*\s*[:{])'                              # followed by real name + body/base
+)
+
+
+def _strip_export_macros(source: bytes) -> bytes:
+    """Blank out export macros so tree-sitter sees `class <name>`.
+    Only fires when an ALL-CAPS (or __declspec) token sits between the
+    keyword and ANOTHER identifier-then-body, which is unambiguously a
+    macro — a normal `class Foo {` or all-caps `class FOO {` (single
+    name) is left untouched.
+    """
+    def blank(m):
+        macro = m.group(2)
+        return m.group(1) + b' ' + (b' ' * len(macro))
+    return _EXPORT_MACRO_RE.sub(blank, source)
+
+
 # ── Field type classification ────────────────────────────────
 # These regex live here, on a small sub-language (C++ type
 # expressions) that tree-sitter has already isolated for us — not on
@@ -272,7 +298,7 @@ def parse_file(file_path):
     and rely on a later project-wide resolve pass.
     """
     path = Path(file_path)
-    source = path.read_bytes()
+    source = _strip_export_macros(path.read_bytes())
     tree = _parser.parse(source)
     root = tree.root_node
 
@@ -469,32 +495,115 @@ _CPP_EXTS = {'.h', '.hxx', '.hpp', '.cxx', '.cpp', '.c'}
 # separate regex-based path (deferred).
 
 
-def parse_project(root_dir):
+# Type aliases: `using X = Y;` (alias_declaration) and `typedef Y X;`
+# (type_definition). Real projects route most relationships through
+# aliases (spdlog's sink_ptr = shared_ptr<sinks::sink>), so we must
+# resolve them or the dependency graph collapses.
+_ALIAS_QUERY = Query(CPP, """
+    (alias_declaration
+        name: (type_identifier) @alias
+        type: (type_descriptor) @target)
+    (type_definition
+        type: (_) @target
+        declarator: (type_identifier) @alias)
+""")
+
+
+def extract_aliases(file_path):
+    """Return {alias_short_name: target_type_text} for one file."""
+    source = Path(file_path).read_bytes()
+    tree = _parser.parse(source)
+    aliases = {}
+    for _idx, caps in QueryCursor(_ALIAS_QUERY).matches(tree.root_node):
+        if 'alias' not in caps or 'target' not in caps:
+            continue
+        alias = caps['alias'][0].text.decode()
+        target = caps['target'][0].text.decode()
+        aliases[alias] = target
+    return aliases
+
+
+def _resolve_alias_chain(alias_map, name, _depth=0):
+    """Follow an alias to its innermost class name, chasing alias→alias
+    chains. Returns a class short-name, or None if it bottoms out at a
+    primitive / std type. Bounded depth guards against cyclic typedefs.
+    """
+    if _depth > 8 or name not in alias_map:
+        return None
+    inner = _innermost_type_name(alias_map[name])
+    if inner is None:
+        return None
+    if inner in alias_map:                       # alias points at another alias
+        chained = _resolve_alias_chain(alias_map, inner, _depth + 1)
+        return chained if chained else None
+    return inner
+
+
+# Directory name fragments that mark vendored / third-party code we
+# don't want polluting the graph (spdlog bundles all of fmt here).
+_VENDOR_DIRS = ('bundled', 'third_party', 'thirdparty', 'external',
+                'vendor', 'deps', '_deps')
+
+
+def _is_vendored(path, root):
+    rel_parts = set(path.relative_to(root).parts)
+    return any(v in rel_parts for v in _VENDOR_DIRS)
+
+
+def parse_project(root_dir, exclude_vendored=True):
     """Parse every C++ file under root_dir and return
-    (all_entities, all_relationships) with cross-file target_qname
-    resolved wherever possible.
+    (all_entities, all_relationships, stats) with cross-file
+    target_qname resolved wherever possible.
 
     Resolution rule: if a relationship's target_name appears exactly
     once as the short name of some entity in the project, fill the
     edge's target_qname. Skip resolution when the name is missing
     (truly external, e.g. std types) or ambiguous (collides across
     namespaces) — the edge stays unresolved.
+
+    exclude_vendored: skip third-party/bundled directories so their
+    code doesn't pollute the dependency graph.
     """
     root = Path(root_dir)
     all_entities = []
     all_relationships = []
+    alias_map = {}          # short_name → target type text (project-wide)
+    skipped_vendored = 0
 
     for path in sorted(root.rglob('*')):
         if not path.is_file() or path.suffix not in _CPP_EXTS:
             continue
+        if exclude_vendored and _is_vendored(path, root):
+            skipped_vendored += 1
+            continue
         try:
             entities, rels = parse_file(path)
+            alias_map.update(extract_aliases(path))
         except Exception as exc:
             # Don't let one bad file kill the whole scan.
             print(f"  ⚠ parse failed for {path}: {exc}")
             continue
         all_entities.extend(entities)
         all_relationships.extend(rels)
+
+    # ── alias expansion: rewrite relationship targets through aliases ─
+    # e.g. target_name 'sink_ptr' → alias chain → 'sink'. If an alias
+    # bottoms out at a primitive (level_t = atomic<int>), the edge is
+    # dropped (its target isn't a class).
+    alias_expanded = 0
+    alias_dropped = 0
+    surviving = []
+    for rel in all_relationships:
+        if rel.target_qname is None and rel.target_name in alias_map:
+            resolved = _resolve_alias_chain(alias_map, rel.target_name)
+            if resolved is None:
+                alias_dropped += 1
+                continue        # alias → primitive/std: not a class edge
+            rel.attrs['alias_from'] = rel.target_name
+            rel.target_name = resolved
+            alias_expanded += 1
+        surviving.append(rel)
+    all_relationships = surviving
 
     # ── build global short-name → qualified_name index ───
     # Only "container" entities are valid relationship targets
@@ -529,4 +638,7 @@ def parse_project(root_dir):
         'relationships': len(all_relationships),
         'resolved_cross_file': resolved_count,
         'ambiguous_unresolved': ambiguous_count,
+        'aliases_known': len(alias_map),
+        'alias_edges_expanded': alias_expanded,
+        'alias_edges_dropped': alias_dropped,
     }
