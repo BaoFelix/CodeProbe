@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-phase2_extract.py — run the real tree-sitter parser on Workshop.hxx
-and see whether it produces the namespaces / classes / structs we
-hand-wrote in phase1_smoke.
+phase2_extract.py — full entity extraction test.
 
-This is the "looking the parser in the eye" step. If the lists don't
-match, the parser is wrong and we fix it before adding methods/fields.
+Phase 2 goal: tree-sitter produces every entity our hand-built
+phase1_smoke listed (namespaces, classes, structs, methods, fields).
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,44 +12,49 @@ from tool.ts_parser import parse_file
 
 FILE = "test_src/Workshop.hxx"
 
-# What we said in Phase 1 the parser should find for this file.
-# Only the "container" kinds — no methods/fields yet.
-expected = [
-    ('namespace', 'Garage'),
-    ('interface', 'Garage::ILogger'),               # we'll detect "interface" later
-    ('struct',    'Garage::ToolSet'),
-    ('class',     'Garage::Workshop'),
-    ('class',     'Garage::Workshop::Receipt'),
-]
 
 def main():
     entities = parse_file(FILE)
-
     print(f"── tree-sitter found {len(entities)} entities ──\n")
-    print(f"{'kind':10s} {'qualified_name':35s} {'parent_qname':25s} lines")
-    print("-" * 90)
-    for e in entities:
-        parent = e.parent_qname or '(top)'
-        print(f"{e.kind:10s} {e.qualified_name:35s} {parent:25s} {e.start_line}-{e.end_line}")
+    print(f"{'kind':10s} {'qualified_name':40s} parent / signature")
+    print("-" * 100)
+    for e in sorted(entities, key=lambda x: (x.start_line, x.qualified_name)):
+        info = e.signature[:50] if e.signature else (e.parent_qname or '(top)')
+        print(f"{e.kind:10s} {e.qualified_name:40s} {info}")
 
-    print("\n── compare against expected ──")
-    got = {(e.kind, e.qualified_name) for e in entities}
-    # We don't expect 'interface' yet — that's a Phase 2b refinement.
-    # For now treat ILogger as a class.
-    expected_phase2a = {
+    # ── coverage check vs phase 1 hand-built set ──────────
+    print("\n── coverage check ──")
+    expected = {
         ('namespace', 'Garage'),
-        ('class',     'Garage::ILogger'),
+        ('class',     'Garage::ILogger'),         # interface detection comes later
         ('struct',    'Garage::ToolSet'),
         ('class',     'Garage::Workshop'),
         ('class',     'Garage::Workshop::Receipt'),
+        ('method',    'Garage::ILogger::log'),
+        ('method',    'Garage::ILogger::~ILogger'),
+        ('method',    'Garage::Workshop::Workshop'),
+        ('method',    'Garage::Workshop::Open'),
+        ('method',    'Garage::Workshop::Close'),
+        ('method',    'Garage::Workshop::Repair'),
+        ('method',    'Garage::Workshop::log'),
+        ('field',     'Garage::ToolSet::wrenchCount'),
+        ('field',     'Garage::ToolSet::screwdriverCount'),
+        ('field',     'Garage::Workshop::m_primaryEngine'),
+        ('field',     'Garage::Workshop::m_spareTank'),
+        ('field',     'Garage::Workshop::m_loaners'),
+        ('field',     'Garage::Workshop::m_borrowedEngine'),
+        ('field',     'Garage::Workshop::m_tools'),
+        ('field',     'Garage::Workshop::Receipt::total'),
+        ('field',     'Garage::Workshop::Receipt::customerName'),
     }
-    missing = expected_phase2a - got
-    extra   = got - expected_phase2a
+    got = {(e.kind, e.qualified_name) for e in entities}
+    missing = expected - got
+    extra = got - expected
     if not missing and not extra:
         print("  ✓ exact match")
     else:
-        if missing: print(f"  ✗ missing: {missing}")
-        if extra:   print(f"  ⚠ extra:   {extra}")
+        if missing: print(f"  ✗ missing ({len(missing)}): {sorted(missing)}")
+        if extra:   print(f"  ⚠ extra   ({len(extra)}): {sorted(extra)}")
 
 
 if __name__ == "__main__":
