@@ -16,16 +16,19 @@ ENTITY_KINDS = {'class', 'struct', 'interface', 'enum',
                 'method', 'field', 'namespace'}
 
 # weak → strong (matches what reader.py used: Lv-0..Lv-5)
-RELATION_KINDS = ('depends',      # Lv-0  include-only / param-or-return type
+# `depends` is the catch-all "uses another entity's code" edge,
+# covering both signature-level use and body-level calls. Future
+# body-call extraction adds attrs={'via': 'body_call', ...} on the
+# same edge kind rather than introducing a new one.
+RELATION_KINDS = ('depends',      # Lv-0  signature param/return OR body call
                   'associates',   # Lv-1  raw pointer / shared_ptr field
                   'implements',   # Lv-2  inherits an interface (I-prefixed / pure virtual)
                   'aggregates',   # Lv-3  container of pointers (vector<X*>)
                   'composes',     # Lv-4  value field / unique_ptr field
-                  'inherits',     # Lv-5  class : public Base
-                  'calls')        # method → method  (Phase B+ — schema reserved)
+                  'inherits')     # Lv-5  class : public Base
 
 LEVEL_OF = {'depends': 0, 'associates': 1, 'implements': 2,
-            'aggregates': 3, 'composes': 4, 'inherits': 5, 'calls': 0}
+            'aggregates': 3, 'composes': 4, 'inherits': 5}
 
 
 @dataclass

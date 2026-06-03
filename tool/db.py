@@ -161,7 +161,7 @@ class DBManager:
                     source_qname    TEXT NOT NULL,           -- always resolved (source is ours)
                     target_qname    TEXT,                    -- NULL when target is external
                     target_name     TEXT NOT NULL,           -- always populated
-                    kind            TEXT NOT NULL,           -- depends|associates|implements|aggregates|composes|inherits|calls
+                    kind            TEXT NOT NULL,           -- depends|associates|implements|aggregates|composes|inherits
                     level           INTEGER NOT NULL,        -- 0..5
                     evidence_file   TEXT,
                     evidence_line   INTEGER,
