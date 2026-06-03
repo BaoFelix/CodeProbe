@@ -7,6 +7,7 @@ Right now this handles namespaces, classes, structs. Methods and fields
 will be added in a follow-up step.
 """
 from pathlib import Path
+import re
 import tree_sitter_cpp
 from tree_sitter import Language, Parser, Query, QueryCursor
 
@@ -119,6 +120,78 @@ def _line_text(source: bytes, line_idx: int) -> str:
         return source.splitlines()[line_idx].decode(errors='replace').strip()
     except IndexError:
         return ''
+
+
+# ── Field type classification ────────────────────────────────
+# These regex live here, on a small sub-language (C++ type
+# expressions) that tree-sitter has already isolated for us — not on
+# raw source. Different scope, different tool tradeoff.
+
+_PRIMITIVES = {'int', 'char', 'bool', 'short', 'long', 'float', 'double',
+               'void', 'unsigned', 'signed', 'size_t', 'string',
+               'auto', 'wchar_t', 'int8_t', 'int16_t', 'int32_t', 'int64_t',
+               'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'}
+
+_CONTAINER_NAMES = ('vector', 'list', 'deque', 'set', 'unordered_set',
+                    'map', 'unordered_map', 'array')
+
+# Container with a pointer-bearing template arg → aggregates.
+# Match `vector<...X*...>` or `vector<...shared_ptr<X>...>`.
+_AGGREGATE_RE = re.compile(
+    r'(?:std::)?(?:' + '|'.join(_CONTAINER_NAMES) + r')\s*<\s*'
+    r'(?:.*?)([A-Z]\w+)\s*(?:\*|\s*>\s*$|\s*,)'
+)
+# Single class-name inside unique_ptr<...> → composes.
+_UNIQUE_RE = re.compile(r'(?:std::)?unique_ptr\s*<\s*([\w:]+)\s*\*?\s*>')
+# Single class-name inside shared_ptr<...> → associates.
+_SHARED_RE = re.compile(r'(?:std::)?shared_ptr\s*<\s*([\w:]+)\s*>')
+# Raw pointer to a non-primitive class → associates.
+_RAW_PTR_RE = re.compile(r'^\s*(?:const\s+)?([\w:]+)\s*\*\s*$')
+# Bare value-type identifier → composes (if not a primitive).
+_VALUE_RE = re.compile(r'^\s*(?:const\s+)?([\w:]+)\s*$')
+
+
+def _last_segment(qname: str) -> str:
+    return qname.split('::')[-1]
+
+
+def classify_field_type(type_str: str):
+    """Return (relation_kind, target_short_name) or None for primitives.
+
+    Examples:
+        'std::unique_ptr<Engine>' → ('composes',   'Engine')
+        'FuelTank'                → ('composes',   'FuelTank')
+        'std::vector<Engine*>'    → ('aggregates', 'Engine')
+        'Engine*'                 → ('associates', 'Engine')
+        'std::shared_ptr<X>'      → ('associates', 'X')
+        'int'                     → None
+        'char*'                   → None
+    """
+    s = type_str.strip()
+
+    m = _UNIQUE_RE.search(s)
+    if m:
+        return ('composes', _last_segment(m.group(1)))
+
+    m = _AGGREGATE_RE.search(s)
+    if m and _last_segment(m.group(1)) not in _PRIMITIVES:
+        return ('aggregates', _last_segment(m.group(1)))
+
+    m = _SHARED_RE.search(s)
+    if m:
+        return ('associates', _last_segment(m.group(1)))
+
+    m = _RAW_PTR_RE.match(s)
+    if m:
+        name = _last_segment(m.group(1))
+        return None if name in _PRIMITIVES else ('associates', name)
+
+    m = _VALUE_RE.match(s)
+    if m:
+        name = _last_segment(m.group(1))
+        return None if name in _PRIMITIVES else ('composes', name)
+
+    return None
 
 
 def parse_file(file_path):
@@ -254,6 +327,30 @@ def parse_file(file_path):
             evidence_file=str(path),
             evidence_line=def_node.start_point[0] + 1,
             evidence_text=_line_text(source, def_node.start_point[0]),
+        ))
+
+    # ── relationships: field-based (composes / aggregates / associates) ──
+    # Source class = the field's parent class (not the field itself).
+    # Evidence  = the field declaration line.
+    for e in entities:
+        if e.kind != 'field' or e.parent_qname is None:
+            continue
+        # Skip fields of namespaces / structs-at-top-level — we only
+        # surface relationships rooted in classes/structs.
+        # (parent_qname being set already enforces enclosing container.)
+        classified = classify_field_type(e.signature or '')
+        if not classified:
+            continue
+        rel_kind, target_short = classified
+        relationships.append(Relationship(
+            source_qname=e.parent_qname,
+            target_name=target_short,
+            target_qname=same_file_index.get(target_short),
+            kind=rel_kind,
+            evidence_file=str(path),
+            evidence_line=e.start_line,
+            evidence_text=_line_text(source, e.start_line - 1),
+            attrs={'via_field': e.name, 'type_text': e.signature},
         ))
 
     return entities, relationships
