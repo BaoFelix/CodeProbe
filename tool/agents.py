@@ -19,6 +19,9 @@ from .db import DBManager
 from .reader import FileReader
 from .prompts import PromptBuilder
 from .llm import LLMClient
+from .ts_parser import parse_project
+from .workflow import build_graph, score_nodes, classify_utility, detect_style
+from .model import LEVEL_OF
 
 
 class BaseAgent:
@@ -55,105 +58,144 @@ class BaseAgent:
 
 class ScannerAgent(BaseAgent):
     """
-    Agent-A: Scan source directory, extract structure + dependencies, store to DB.
+    Agent-A: Scan source directory, extract entities + relationships, store to DB.
 
     Input: source directory path
-    Output: classes, dependencies, module_info — all written to DB
-    No LLM needed — pure file operations + regex extraction.
-    Single scan via reader.build_module_map() — no redundant passes.
+    Output: entities + relationships (new graph schema) AND classes +
+            dependencies (legacy tables, kept populated so downstream agents
+            and the report don't break — Phase 7 will remove them).
+    No LLM — pure tree-sitter + graph analysis.
     """
 
     def run(self, directory=None):
-        """Scan directory, store classes + deps + module info. Returns class count."""
-        print(f"\n  [ScannerAgent] Scanning source...")
+        print(f"\n  [ScannerAgent] Scanning with tree-sitter engine...")
 
-        # 1. One-shot scan: build_module_map extracts all structure + dependencies
-        module_map = self.reader.build_module_map(directory)
+        scan_dir = Path(directory) if directory else self.reader.source_root
+        entities, relationships, stats = parse_project(str(scan_dir))
 
-        if not module_map:
-            print(f"  ⚠ No C++ classes found.")
+        if not entities:
+            print(f"  ⚠ No C++ entities found.")
             return 0
 
-        # 2. Identify orchestrator
-        orchestrator = self.reader.find_orchestrator(module_map)
+        # ── Orchestrator scoring + style detection ───────────
+        g = build_graph(entities, relationships)
+        style, note = detect_style(entities, relationships, g)
+        scores = score_nodes(g)
+        if scores:
+            top = max(scores.items(), key=lambda kv: kv[1]['score'])
+            orchestrator = top[0]
+        else:
+            orchestrator = None
 
-        # 3. Collect all classes and dependencies
-        all_classes = []
-        all_deps = []
-        total_classes = 0
+        # ── Persist to the NEW entity-relationship tables ────
+        self.db.clear_graph()
+        n_e = self.db.save_entities(entities)
+        n_r = self.db.save_relationships(relationships)
 
-        for entry in module_map:
-            structure = entry.get('structure', {})
-            if not structure:
-                class_names = entry.get('classes', [])
-                methods = entry.get('methods', [])
-                member_vars = entry.get('member_vars', [])
-            else:
-                class_names = structure.get('classes', [])
-                methods = structure.get('methods', [])
-                member_vars = structure.get('member_vars', [])
+        # ── Translate to LEGACY classes/dependencies tables ──
+        # ResponsibilityAgent and the report still query these; we keep
+        # them filled with the SAME data, just reshaped, until Phase 7
+        # removes the legacy path entirely.
+        legacy_classes, legacy_deps = _to_legacy(entities, relationships,
+                                                 orchestrator)
+        self.db.save_classes_batch(legacy_classes)
+        self.db.save_dependencies(legacy_deps)
 
-            header_path = entry.get('file', '')
-            impl_path = None
-            if header_path:
-                from .config import IMPL_EXTS
-                for ext in IMPL_EXTS:
-                    candidate = Path(header_path).with_suffix(ext)
-                    if candidate.exists():
-                        impl_path = str(candidate)
-                        break
-
-            for cn in class_names:
-                all_classes.append({
-                    'class_name': cn,
-                    'header_path': header_path,
-                    'impl_path': impl_path,
-                    'method_count': len(methods),
-                    'member_count': len(member_vars),
-                    'line_count': entry.get('lines', 0),
-                    'is_orchestrator': 1 if cn == orchestrator else 0,
-                })
-                impl_info = f" + {Path(impl_path).name}" if impl_path else ""
-                deps = entry.get('dependencies', {}).get(cn, [])
-                deps_info = ""
-                if deps:
-                    dep_names = [d['target'] for d in deps]
-                    deps_info = f" \u2192 {', '.join(dep_names)}"
-                print(f"    + {cn:<30} ({Path(header_path).name}{impl_info}){deps_info}")
-                total_classes += 1
-
-            for cn, deps in entry.get('dependencies', {}).items():
-                for dep in deps:
-                    level_str = dep['level']
-                    level_num = int(level_str.split('-')[1])
-                    all_deps.append({
-                        'source_class': cn,
-                        'target_class': dep['target'],
-                        'level': level_num,
-                        'level_name': level_str,
-                        'source_evidence': dep.get('source', ''),
-                        'target_is_external': dep.get('target_is_external', False),
-                    })
-
-        # 4. Batch write to DB (3 operations instead of N)
-        self.db.save_classes_batch(all_classes)
-        self.db.save_dependencies(all_deps)
-
-        # 5. Store module info
-        module_name = 'default'
-        scan_dir = Path(directory) if directory else self.reader.source_root
+        # ── Module summary ────────────────────────────────────
         self.db.save_module_info(
-            module_name=module_name,
+            module_name='default',
             directory=str(scan_dir),
             orchestrator=orchestrator,
-            file_count=len(module_map),
-            class_count=total_classes,
+            file_count=stats['files_parsed'],
+            class_count=len(legacy_classes),
         )
 
-        print(f"\n  ✓ ScannerAgent: registered {total_classes} classes to database")
-        if orchestrator:
-            print(f"  ✓ Orchestrator: {orchestrator}")
-        return total_classes
+        print(f"  ✓ entities={n_e}  relationships={n_r}  "
+              f"files={stats['files_parsed']}")
+        print(f"  ✓ resolved cross-file: {stats['resolved_cross_file']}, "
+              f"aliases expanded: {stats['alias_edges_expanded']}")
+        print(f"  ✓ style: {style}" + (f" — {note[:80]}…" if note else ""))
+        print(f"  ✓ top orchestrator candidate: {orchestrator}")
+
+        # Print first few classes with their deps (visual sanity)
+        for cls in legacy_classes[:12]:
+            tgts = [d['target_class'] for d in legacy_deps
+                    if d['source_class'] == cls['class_name']]
+            arrow = ' → ' + ', '.join(tgts)[:80] if tgts else ''
+            hdr = Path(cls['header_path']).name if cls['header_path'] else ''
+            print(f"    + {cls['class_name'][:32]:32s} {hdr:22s}{arrow}")
+        if len(legacy_classes) > 12:
+            print(f"    … and {len(legacy_classes)-12} more")
+
+        return len(legacy_classes)
+
+
+def _to_legacy(entities, relationships, orchestrator):
+    """Reshape new-model entities/relationships into the legacy
+    classes/dependencies rows that ResponsibilityAgent and the report
+    still consume.
+
+    Choices that matter:
+      - 'classes' rows use qualified_name so name collisions across
+        namespaces aren't squashed by the legacy UNIQUE(class_name).
+      - method_count / member_count count this class's direct children
+        only (parent_qname-based), not file-wide totals.
+      - One legacy dependency row per (source, target) pair, picking
+        the strongest level. Multi-edge richness lives in the new
+        relationships table — legacy can't represent it and we don't
+        want to triple-count.
+    """
+    children = {}
+    for e in entities:
+        if e.parent_qname:
+            children.setdefault(e.parent_qname, []).append(e)
+
+    classes = []
+    for e in entities:
+        if e.kind not in ('class', 'struct', 'interface'):
+            continue
+        kids = children.get(e.qualified_name, [])
+        methods = [k for k in kids if k.kind == 'method']
+        fields = [k for k in kids if k.kind == 'field']
+        header = e.file_path
+        impl = None
+        if header:
+            stem = Path(header).with_suffix('')
+            for ext in ('.cxx', '.cpp', '.c'):
+                cand = stem.with_suffix(ext)
+                if cand.exists():
+                    impl = str(cand)
+                    break
+        classes.append({
+            'class_name': e.qualified_name,
+            'header_path': header,
+            'impl_path': impl,
+            'method_count': len(methods),
+            'member_count': len(fields),
+            'line_count': max(0, e.end_line - e.start_line + 1),
+            'is_orchestrator': 1 if e.qualified_name == orchestrator else 0,
+        })
+
+    strongest = {}
+    for r in relationships:
+        if r.target_qname is None:
+            continue
+        key = (r.source_qname, r.target_qname)
+        level = LEVEL_OF[r.kind]
+        cur = strongest.get(key)
+        if cur is None or level > cur[0]:
+            strongest[key] = (level, r.kind, r.evidence_text)
+
+    deps = [{
+        'source_class': src,
+        'target_class': tgt,
+        'level': level,
+        'level_name': f'Lv-{level}',
+        'source_evidence': evidence[:200] if evidence else '',
+        'target_is_external': False,
+    } for (src, tgt), (level, kind, evidence) in strongest.items()]
+
+    return classes, deps
 
 
 class ResponsibilityAgent(BaseAgent):
