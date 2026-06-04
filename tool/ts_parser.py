@@ -560,8 +560,120 @@ def _ancestor_types(node):
 # ── Project-wide parsing & resolution ────────────────────────
 
 _CPP_EXTS = {'.h', '.hxx', '.hpp', '.cxx', '.cpp', '.c'}
-# .sch is intentionally NOT here — it's a private DSL and will use a
-# separate regex-based path (deferred).
+# .sch is a private DSL with two custom keywords (`superclass Parent`
+# and `forward_declare class X;`) that tree-sitter-cpp won't parse.
+# It gets a small regex-based path below (parse_sch_file), wired into
+# parse_project the same way as .cpp files. The accuracy on .sch is
+# necessarily lower than on real C++ — we document the limit honestly
+# rather than pretend the regex matches tree-sitter's reach.
+_SCH_EXTS = {'.sch'}
+_ALL_EXTS = _CPP_EXTS | _SCH_EXTS
+
+
+# ── .sch regex extractor ─────────────────────────────────────
+# Three patterns are enough to cover the conventions the old reader
+# already handled. Anything more exotic stays unparsed.
+_SCH_CLASS_RE = re.compile(
+    r'^\s*class\s+(\w+)\s*\{', re.MULTILINE)
+_SCH_SUPERCLASS_RE = re.compile(
+    r'^\s*superclass\s+(\w+)', re.MULTILINE)
+_SCH_FIELD_RE = re.compile(
+    # Type then a member name (member-prefix convention common in .sch),
+    # ending with semicolon. Skips method declarations (have '(').
+    r'^\s*([\w:]+(?:<[\w:,\s*&]+>)?[\s*&]*)\s+(m_\w+|\w+)\s*;',
+    re.MULTILINE)
+
+
+def parse_sch_file(file_path):
+    """Minimal .sch parser. Returns (entities, relationships) with the
+    same shape parse_file produces, so the rest of the pipeline can
+    treat .sch and .hxx identically.
+
+    Limits (documented, not hidden):
+      - One class per file is the only well-tested case. Multi-class
+        .sch files extract each class but the first is the inheritance
+        anchor for `superclass`.
+      - Methods aren't extracted (signatures are too varied in this
+        DSL); only fields and inheritance show up.
+      - No nesting, no namespaces, no aliases.
+    """
+    path = Path(file_path)
+    source = path.read_text(errors='replace')
+    lines = source.splitlines()
+
+    entities = []
+    relationships = []
+
+    class_names = _SCH_CLASS_RE.findall(source)
+    if not class_names:
+        return entities, relationships
+
+    # Walk each class definition; record where it starts so we can give
+    # the field declarations a parent.
+    for m in _SCH_CLASS_RE.finditer(source):
+        cn = m.group(1)
+        start_line = source.count('\n', 0, m.start()) + 1
+        entities.append(Entity(
+            kind='class',
+            name=cn,
+            qualified_name=cn,
+            parent_qname=None,
+            file_path=str(path),
+            start_line=start_line,
+            end_line=start_line,    # we don't track block ends in .sch
+        ))
+
+    primary = class_names[0]
+
+    # Inheritance: superclass Parent → inherits/implements edge on the
+    # first class (the .sch convention is one class per file).
+    for m in _SCH_SUPERCLASS_RE.finditer(source):
+        parent = m.group(1)
+        line_no = source.count('\n', 0, m.start()) + 1
+        relationships.append(Relationship(
+            source_qname=primary,
+            target_name=parent,
+            kind='inherits',     # global retag may upgrade to implements
+            evidence_file=str(path),
+            evidence_line=line_no,
+            evidence_text=lines[line_no - 1].strip() if line_no <= len(lines) else '',
+        ))
+
+    # Fields: reuse classify_field_type, the same logic .hxx uses.
+    for m in _SCH_FIELD_RE.finditer(source):
+        type_text = m.group(1).strip()
+        field_name = m.group(2)
+        line_no = source.count('\n', 0, m.start()) + 1
+        # Skip lines that look like method declarations slipped in.
+        line_text = lines[line_no - 1] if line_no <= len(lines) else ''
+        if '(' in line_text:
+            continue
+        entities.append(Entity(
+            kind='field',
+            name=field_name,
+            qualified_name=f'{primary}::{field_name}',
+            parent_qname=primary,
+            file_path=str(path),
+            start_line=line_no,
+            end_line=line_no,
+            signature=type_text,
+        ))
+        classified = classify_field_type(type_text)
+        if not classified:
+            continue
+        rel_kind, target_short = classified
+        relationships.append(Relationship(
+            source_qname=primary,
+            target_name=target_short,
+            kind=rel_kind,
+            evidence_file=str(path),
+            evidence_line=line_no,
+            evidence_text=line_text.strip(),
+            attrs={'via_field': field_name, 'type_text': type_text,
+                   'source': '.sch'},
+        ))
+
+    return entities, relationships
 
 
 # Type aliases: `using X = Y;` (alias_declaration) and `typedef Y X;`
@@ -640,14 +752,18 @@ def parse_project(root_dir, exclude_vendored=True):
     skipped_vendored = 0
 
     for path in sorted(root.rglob('*')):
-        if not path.is_file() or path.suffix not in _CPP_EXTS:
+        if not path.is_file() or path.suffix not in _ALL_EXTS:
             continue
         if exclude_vendored and _is_vendored(path, root):
             skipped_vendored += 1
             continue
         try:
-            entities, rels = parse_file(path)
-            alias_map.update(extract_aliases(path))
+            if path.suffix in _SCH_EXTS:
+                entities, rels = parse_sch_file(path)
+                # .sch has no `using`/`typedef` — skip alias extraction.
+            else:
+                entities, rels = parse_file(path)
+                alias_map.update(extract_aliases(path))
         except Exception as exc:
             # Don't let one bad file kill the whole scan.
             print(f"  ⚠ parse failed for {path}: {exc}")
@@ -719,7 +835,7 @@ def parse_project(root_dir, exclude_vendored=True):
 
     return all_entities, all_relationships, {
         'files_parsed': sum(1 for p in root.rglob('*')
-                            if p.is_file() and p.suffix in _CPP_EXTS),
+                            if p.is_file() and p.suffix in _ALL_EXTS),
         'entities': len(all_entities),
         'relationships': len(all_relationships),
         'resolved_cross_file': resolved_count,
