@@ -110,12 +110,11 @@ class DBManager:
                 );
 
                 /* ── entity-relationship model ──────────────────────────
-                   The whole graph lives here. Legacy `classes` and
-                   `dependencies` tables were removed in Phase 7;
-                   db.get_dependencies() / get_all_tasks() now read
-                   from these and reshape to the old return form so
-                   the existing callers (ResponsibilityAgent, report,
-                   pipeline) keep working. */
+                   The whole graph lives here. The single source of
+                   truth: every consumer (ScannerAgent, ResponsibilityAgent,
+                   the report layer, the pipeline) queries entities +
+                   relationships directly via get_entities /
+                   get_relationships / get_classes / get_entity. */
 
                 CREATE TABLE IF NOT EXISTS entities (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -156,95 +155,11 @@ class DBManager:
         finally:
             conn.close()
 
-    # ─── Class Registration ──────────────────────────────────
-
-    # ─── Class / dependency reads (read from the new graph tables) ──
-    #
-    # The legacy `classes` and `dependencies` tables were removed in
-    # Phase 7. The function names stay because ResponsibilityAgent, the
-    # report, and the pipeline still call them — they're now thin
-    # adapters that query entities / relationships and reshape the rows
-    # to the legacy dict shape downstream expects.
-
-    @staticmethod
-    def _class_row_from_entity(row, orchestrator=None):
-        """Reshape an entities-table row (kind in class/struct/interface)
-        into the legacy `classes` row dict downstream code expects."""
-        return {
-            'id': row['id'],
-            'class_name': row['qualified_name'],
-            'module': 'default',
-            'header_path': row['file_path'],
-            'impl_path': None,    # filled by source_io when needed
-            'method_count': 0,    # filled below by caller if it cares
-            'member_count': 0,
-            'line_count': max(0, (row['end_line'] or 0) - (row['start_line'] or 0) + 1),
-            'is_orchestrator': 1 if orchestrator and row['qualified_name'] == orchestrator else 0,
-        }
-
-    @staticmethod
-    def _dep_row_from_relationship(row):
-        """Reshape a relationships-table row into the legacy dependency
-        dict (one row per edge — multi-edge richness stays in the new
-        table, this view shows the strongest only via highest level)."""
-        return {
-            'id': row['id'],
-            'source_class': row['source_qname'],
-            'target_class': row['target_qname'] or row['target_name'],
-            'level': row['level'],
-            'level_name': f'Lv-{row["level"]}',
-            'source_evidence': (row['evidence_text'] or '')[:200],
-            'target_is_external': 0 if row['target_qname'] else 1,
-        }
-
-    def get_dependencies(self, source_class=None):
-        """Strongest edge per (source, target) pair, optionally filtered
-        by source. Reads relationships, collapses multi-edges to the
-        highest level (the legacy shape can't carry multiple).
-        """
-        if source_class:
-            rows = self._query_all(
-                "SELECT * FROM relationships WHERE source_qname = ? "
-                "ORDER BY level DESC",
-                (source_class,))
-        else:
-            rows = self._query_all(
-                "SELECT * FROM relationships ORDER BY source_qname, level DESC")
-        # Collapse to strongest per (source, target).
-        seen = set()
-        out = []
-        for r in rows:
-            key = (r['source_qname'], r['target_qname'] or r['target_name'])
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(self._dep_row_from_relationship(r))
-        out.sort(key=lambda d: d['level'])
-        return out
-
-    def get_dependents_of_class(self, class_name):
-        """Incoming edges to a class. Same collapse rule as
-        get_dependencies."""
-        rows = self._query_all(
-            "SELECT * FROM relationships WHERE target_qname = ? "
-            "ORDER BY level DESC",
-            (class_name,))
-        seen = set()
-        out = []
-        for r in rows:
-            key = (r['source_qname'], r['target_qname'] or r['target_name'])
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(self._dep_row_from_relationship(r))
-        out.sort(key=lambda d: d['level'])
-        return out
-
-    # ─── Module Info ─────────────────────────────────────────
+    # ─── Module info ─────────────────────────────────────────
 
     def save_module_info(self, module_name, directory=None, orchestrator=None,
                          file_count=None, class_count=None):
-        """Save module scan info."""
+        """Record one scan's summary row."""
         self._execute("""
             INSERT INTO module_info
                 (module_name, directory, orchestrator, file_count, class_count)
@@ -253,68 +168,16 @@ class DBManager:
               orchestrator, file_count, class_count))
 
     def get_module_info(self, module_name=None):
-        """Get module info. Returns latest entry (for specific module or overall)."""
+        """Latest module_info row (for a specific module or overall)."""
         if module_name:
             return self._query_one(
-                "SELECT * FROM module_info WHERE module_name = ? ORDER BY id DESC LIMIT 1",
-                (module_name,)
-            )
-        return self._query_one("SELECT * FROM module_info ORDER BY id DESC LIMIT 1")
+                "SELECT * FROM module_info WHERE module_name = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (module_name,))
+        return self._query_one(
+            "SELECT * FROM module_info ORDER BY id DESC LIMIT 1")
 
-    # ─── Query ───────────────────────────────────────────────
-
-    def _orchestrator(self):
-        """Latest scan's recorded orchestrator (or None)."""
-        mi = self.get_module_info()
-        return mi['orchestrator'] if mi else None
-
-    def get_class_by_name(self, class_name):
-        """One class record by qualified_name. Returns legacy shape so
-        old callers don't notice the underlying table changed.
-        """
-        row = self._query_one(
-            "SELECT * FROM entities "
-            "WHERE qualified_name = ? AND kind IN ('class','struct','interface')",
-            (class_name,))
-        if not row:
-            return None
-        out = self._class_row_from_entity(row, self._orchestrator())
-        # Fill method/member counts from child entities of this class.
-        kids = self._query_all(
-            "SELECT kind FROM entities WHERE parent_qname = ?",
-            (class_name,))
-        out['method_count'] = sum(1 for k in kids if k['kind'] == 'method')
-        out['member_count'] = sum(1 for k in kids if k['kind'] == 'field')
-        return out
-
-    # Alias for backward compatibility (callers use get_task)
-    get_task = get_class_by_name
-
-    def get_all_tasks(self):
-        """All class/struct/interface entities, legacy-shaped, with the
-        same method/member counts the old `classes` table held.
-        """
-        rows = self._query_all(
-            "SELECT * FROM entities "
-            "WHERE kind IN ('class','struct','interface') "
-            "ORDER BY id")
-        if not rows:
-            return []
-        # One query for all child counts; group in Python.
-        kid_rows = self._query_all(
-            "SELECT parent_qname, kind, COUNT(*) AS n FROM entities "
-            "WHERE parent_qname IS NOT NULL "
-            "GROUP BY parent_qname, kind")
-        method_counts = {r['parent_qname']: r['n'] for r in kid_rows if r['kind'] == 'method'}
-        field_counts  = {r['parent_qname']: r['n'] for r in kid_rows if r['kind'] == 'field'}
-        orch = self._orchestrator()
-        out = []
-        for r in rows:
-            d = self._class_row_from_entity(r, orch)
-            d['method_count'] = method_counts.get(r['qualified_name'], 0)
-            d['member_count'] = field_counts.get(r['qualified_name'], 0)
-            out.append(d)
-        return out
+    # ─── Aggregates / dashboard ──────────────────────────────
 
     def get_stats(self):
         """total / analyzed / pending counts for the dashboard."""
@@ -481,16 +344,45 @@ class DBManager:
         sql += " ORDER BY qualified_name"
         return self._query_all(sql, params)
 
-    def get_relationships(self, source_qname=None, kind=None):
+    def get_relationships(self, source_qname=None, target_qname=None, kind=None):
+        """Query relationships, optionally filtered. Returns rows in
+        their natural shape (source_qname / target_qname / target_name /
+        kind / level / evidence_text / attrs).
+        """
         sql = "SELECT * FROM relationships WHERE 1=1"
         params = []
         if source_qname:
             sql += " AND source_qname = ?"
             params.append(source_qname)
+        if target_qname:
+            sql += " AND target_qname = ?"
+            params.append(target_qname)
         if kind:
             sql += " AND kind = ?"
             params.append(kind)
+        sql += " ORDER BY level DESC"
         return self._query_all(sql, params)
+
+    def get_entity(self, qualified_name, kind=None):
+        """One entity by qualified name (and optional kind disambiguation
+        — same qname can in theory exist as both class and namespace).
+        """
+        if kind:
+            return self._query_one(
+                "SELECT * FROM entities WHERE qualified_name = ? AND kind = ?",
+                (qualified_name, kind))
+        return self._query_one(
+            "SELECT * FROM entities WHERE qualified_name = ?",
+            (qualified_name,))
+
+    def get_classes(self):
+        """All class/struct/interface entities. Convenience wrapper since
+        most downstream code wants 'the things that are classes' as a
+        single list."""
+        return self._query_all(
+            "SELECT * FROM entities "
+            "WHERE kind IN ('class','struct','interface') "
+            "ORDER BY qualified_name")
 
     def clear_graph(self):
         """Wipe entities + relationships (called on re-scan)."""

@@ -110,14 +110,13 @@ class ScannerAgent(BaseAgent):
         print(f"  ✓ style: {style}" + (f" — {note[:80]}…" if note else ""))
         print(f"  ✓ top orchestrator candidate: {orchestrator}")
 
-        # Visual sanity: a few classes with their dependencies (via the
-        # legacy-shaped adapters so we see what downstream sees).
-        for cls in self.db.get_all_tasks()[:12]:
-            tgts = [d['target_class']
-                    for d in self.db.get_dependencies(cls['class_name'])]
+        # Visual sanity: a few classes with their dependencies.
+        for cls in self.db.get_classes()[:12]:
+            tgts = [r['target_qname'] or r['target_name']
+                    for r in self.db.get_relationships(source_qname=cls['qualified_name'])]
             arrow = ' → ' + ', '.join(tgts)[:80] if tgts else ''
-            hdr = Path(cls['header_path']).name if cls['header_path'] else ''
-            print(f"    + {cls['class_name'][:32]:32s} {hdr:22s}{arrow}")
+            hdr = Path(cls['file_path']).name if cls['file_path'] else ''
+            print(f"    + {cls['qualified_name'][:32]:32s} {hdr:22s}{arrow}")
         if class_count > 12:
             print(f"    … and {class_count - 12} more")
 
@@ -143,9 +142,9 @@ class ResponsibilityAgent(BaseAgent):
 
         # Step 1: Build module context from DB
         module_info = self.db.get_module_info()
-        outgoing_deps = self.db.get_dependencies(class_name)
-        incoming_deps = self.db.get_dependents_of_class(class_name)
-        all_classes = self.db.get_all_tasks()
+        outgoing_deps = self.db.get_relationships(source_qname=class_name)
+        incoming_deps = self.db.get_relationships(target_qname=class_name)
+        all_classes = self.db.get_classes()
 
         context_parts = []
         if module_info:
@@ -153,15 +152,19 @@ class ResponsibilityAgent(BaseAgent):
             context_parts.append(f"Orchestrator: {module_info['orchestrator'] or '—'}")
             context_parts.append(f"Total classes: {module_info['class_count']}")
         if outgoing_deps:
-            dep_lines = [f"  → {d['target_class']} ({d['level_name']} — {d['source_evidence']})"
-                         for d in outgoing_deps]
+            dep_lines = [
+                f"  → {d['target_qname'] or d['target_name']} "
+                f"({d['kind']} Lv-{d['level']} — {(d['evidence_text'] or '').strip()})"
+                for d in outgoing_deps]
             context_parts.append(f"Outgoing dependencies of {class_name}:\n" + "\n".join(dep_lines))
         if incoming_deps:
-            dep_lines = [f"  ← {d['source_class']} ({d['level_name']} — {d['source_evidence']})"
-                         for d in incoming_deps]
+            dep_lines = [
+                f"  ← {d['source_qname']} "
+                f"({d['kind']} Lv-{d['level']} — {(d['evidence_text'] or '').strip()})"
+                for d in incoming_deps]
             context_parts.append(f"Incoming dependencies (who depends on {class_name}):\n" + "\n".join(dep_lines))
         if all_classes:
-            names = [c['class_name'] for c in all_classes if c['class_name'] != class_name]
+            names = [c['qualified_name'] for c in all_classes if c['qualified_name'] != class_name]
             if names:
                 context_parts.append(f"Other classes in module: {', '.join(names)}")
         module_context = "\n".join(context_parts) if context_parts else "No module context available."
@@ -173,10 +176,10 @@ class ResponsibilityAgent(BaseAgent):
         )
 
         if not source_content:
-            # Fallback: try reading from DB header_path
-            task = self.db.get_task(class_name)
-            if task and task['header_path']:
-                content, lines = self.reader.read_file(task['header_path'])
+            # Fallback: try reading from the entity's recorded file_path
+            entity = self.db.get_entity(class_name)
+            if entity and entity['file_path']:
+                content, lines = self.reader.read_file(entity['file_path'])
                 if content:
                     source_content = content
 
@@ -238,7 +241,7 @@ class DesignAgent(BaseAgent):
 
         # Step 1: Read all data from DB
         module_info = self.db.get_module_info()
-        all_deps = self.db.get_dependencies()
+        all_deps = self.db.get_relationships()
         all_resps = self.db.get_all_responsibilities()
 
         if not all_resps:
@@ -302,13 +305,14 @@ class DesignAgent(BaseAgent):
 
     @staticmethod
     def _summarize_deps(deps):
-        """Build compact dependency summary from DB records."""
+        """Build compact dependency summary from relationship rows."""
         if not deps:
             return "No dependencies recorded."
         by_source = {}
         for d in deps:
-            by_source.setdefault(d['source_class'], []).append(
-                f"{d['target_class']} ({d['level_name']})")
+            tgt = d['target_qname'] or d['target_name']
+            by_source.setdefault(d['source_qname'], []).append(
+                f"{tgt} ({d['kind']} Lv-{d['level']})")
         lines = []
         for src, targets in by_source.items():
             lines.append(f"  {src} → {', '.join(targets)}")

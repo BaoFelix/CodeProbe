@@ -16,13 +16,19 @@ def generate_focus_report(db, class_name, output_path):
     Pulls responsibility analysis, dependencies (outgoing + incoming),
     and module context from DB. Writes to output_path.
     """
+    from .row_shapes import dep_dict, class_dict
     resp = db.get_responsibility(class_name)
-    task = db.get_class_by_name(class_name)
     module_info = db.get_module_info()
-    outgoing_deps = db.get_dependencies(class_name) or []
-    incoming_deps = db.get_dependents_of_class(class_name) or []
+    orchestrator = module_info['orchestrator'] if module_info else None
+    kid_rows = db._query_all(
+        "SELECT parent_qname, kind, COUNT(*) AS n FROM entities "
+        "WHERE parent_qname IS NOT NULL GROUP BY parent_qname, kind")
+    raw_task = db.get_entity(class_name)
+    task = class_dict(raw_task, orchestrator, kid_rows) if raw_task else None
+    outgoing_deps = [dep_dict(r) for r in db.get_relationships(source_qname=class_name) or []]
+    incoming_deps = [dep_dict(r) for r in db.get_relationships(target_qname=class_name) or []]
     # All deps needed for data-class detection and bypass analysis
-    all_deps = db.get_dependencies() or []
+    all_deps = [dep_dict(r) for r in db.get_relationships() or []]
 
     html = _build_focus_html(class_name, resp, task, module_info,
                              outgoing_deps, incoming_deps, all_deps)

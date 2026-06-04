@@ -6,16 +6,23 @@ from .layer1_workflow import _section_responsibility_map
 from .layer2_deps import _section_dependency_health
 from .layer3_actions import _section_action_items
 from .sections import _section_overview
+from .row_shapes import dep_dict, class_dict
 
 
 def generate_html_report(db, output_path, reader=None):
     """Read all data from DB, generate three-layer diagnostic HTML report.
     reader is accepted for backward compatibility but NOT used."""
     stats = db.get_stats()
-    tasks = db.get_all_tasks()
-    resps = db.get_all_responsibilities()
     module_info = db.get_module_info()
-    all_deps = db.get_dependencies()
+    orchestrator = module_info['orchestrator'] if module_info else None
+    # Children counts (method/member) for the class_dict reshape.
+    kid_rows = db._query_all(
+        "SELECT parent_qname, kind, COUNT(*) AS n FROM entities "
+        "WHERE parent_qname IS NOT NULL GROUP BY parent_qname, kind")
+
+    tasks = [class_dict(c, orchestrator, kid_rows) for c in db.get_classes()]
+    all_deps = [dep_dict(r) for r in db.get_relationships()]
+    resps = db.get_all_responsibilities()
 
     html = _build_html(stats, tasks, resps or [], module_info, all_deps or [])
     output_path = Path(output_path)

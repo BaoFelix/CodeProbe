@@ -41,12 +41,12 @@ def main():
     assert len(rels) >= 5, f"relationships table only has {len(rels)}"
     print(f"  ✓ new tables: {len(entities)} entities, {len(rels)} relationships")
 
-    # ── legacy tables filled? ────────────────────────────
-    classes = db.get_all_tasks()
-    deps = db.get_dependencies()
-    assert len(classes) >= 5, f"classes table only has {len(classes)}"
-    assert len(deps) >= 5, f"dependencies table only has {len(deps)}"
-    print(f"  ✓ legacy tables: {len(classes)} classes, {len(deps)} dependencies")
+    # ── consumer-facing reads via the native API? ────────
+    classes = db.get_classes()
+    deps = db.get_relationships()
+    assert len(classes) >= 5, f"classes query returned only {len(classes)} rows"
+    assert len(deps) >= 5, f"relationships query returned only {len(deps)} rows"
+    print(f"  ✓ get_classes: {len(classes)} rows, get_relationships: {len(deps)} rows")
 
     # ── orchestrator wired through to module_info? ───────
     mi = db.get_module_info()
@@ -55,17 +55,17 @@ def main():
     print(f"  ✓ orchestrator picked: {mi['orchestrator']}")
 
     # ── qualified names preserved (Outer::Inner ≠ Outer) ─
-    names = {c['class_name'] for c in classes}
+    names = {c['qualified_name'] for c in classes}
     assert 'Outer::Inner' in names, "inner class qualified_name lost"
     print(f"  ✓ qualified names preserved (Outer::Inner present)")
 
     # ── ResponsibilityAgent could read its inputs? ───────
-    wks_deps = db.get_dependencies('Garage::Workshop')
-    targets = {d['target_class'] for d in wks_deps}
+    wks_deps = db.get_relationships(source_qname='Garage::Workshop')
+    targets = {r['target_qname'] or r['target_name'] for r in wks_deps}
     expected = {'Engine', 'FuelTank', 'Garage::ToolSet', 'Garage::ILogger'}
     missing = expected - targets
     assert not missing, f"Workshop missing deps: {missing}"
-    print(f"  ✓ Workshop's deps reachable via legacy API: {sorted(targets)}")
+    print(f"  ✓ Workshop's deps reachable: {sorted(targets)}")
 
     print("\nPhase 5b smoke: PASS — engine successfully wired into pipeline.")
 

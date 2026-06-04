@@ -109,11 +109,12 @@ def create_mcp_server():
         Get current analysis progress: total classes, analyzed, pending.
         """
         stats = db.get_stats()
-        tasks = db.get_all_tasks()
+        tasks = db.get_classes()
 
         if not stats or stats['total'] == 0:
             return "Database is empty. Run scan_source first."
 
+        orchestrator = (db.get_module_info() or {}).get('orchestrator')
         lines = [
             f"Total classes: {stats['total']}",
             f"Analyzed: {stats['analyzed']}",
@@ -121,8 +122,9 @@ def create_mcp_server():
         ]
         lines.append("\nClass list:")
         for t in tasks:
-            orch = ' [orchestrator]' if t['is_orchestrator'] else ''
-            lines.append(f"  {t['class_name']}{orch}")
+            qn = t['qualified_name']
+            orch = ' [orchestrator]' if qn == orchestrator else ''
+            lines.append(f"  {qn}{orch}")
         return "\n".join(lines)
 
     @mcp.tool()

@@ -106,11 +106,11 @@ class Pipeline:
     def _resp_analyze_all(self):
         """Step 2: Per-class responsibility analysis (parallel).
         Context comes from DB (dependencies, module info)."""
-        classes = self.db.get_all_tasks()
+        classes = self.db.get_classes()
 
         to_analyze = []
         for cls in classes:
-            cn = cls['class_name']
+            cn = cls['qualified_name']
             existing = self.db.get_responsibility(cn)
             if existing:
                 print(f"  [skip] {cn}")
@@ -157,7 +157,14 @@ class Pipeline:
     def show_status(self):
         """Show progress dashboard."""
         stats = self.db.get_stats()
-        tasks = self.db.get_all_tasks()
+        tasks = self.db.get_classes()
+        orchestrator = (self.db.get_module_info() or {}).get('orchestrator') if self.db.get_module_info() else None
+        # method/member counts come from children of each class entity
+        kid_rows = self.db._query_all(
+            "SELECT parent_qname, kind, COUNT(*) AS n FROM entities "
+            "WHERE parent_qname IS NOT NULL GROUP BY parent_qname, kind")
+        method_counts = {r['parent_qname']: r['n'] for r in kid_rows if r['kind'] == 'method'}
+        field_counts = {r['parent_qname']: r['n'] for r in kid_rows if r['kind'] == 'field'}
 
         if not stats or stats['total'] == 0:
             print("\n  Database is empty. Run init + scan first.")
@@ -179,10 +186,11 @@ class Pipeline:
         print(f"║  {'─'*28} {'─'*7} {'─'*7} {'─'*5}   ║")
 
         for t in tasks:
-            name = t['class_name'][:28]
-            methods = str(t['method_count'] or 0)
-            members = str(t['member_count'] or 0)
-            orch = '★' if t['is_orchestrator'] else '·'
+            qname = t['qualified_name']
+            name = qname[:28]
+            methods = str(method_counts.get(qname, 0))
+            members = str(field_counts.get(qname, 0))
+            orch = '★' if qname == orchestrator else '·'
             print(f"║  {name:<28} {methods:>7} {members:>7} {orch:>5}   ║")
 
         print(f"╚══════════════════════════════════════════════════════════╝")
@@ -236,12 +244,12 @@ class Pipeline:
         print(f"  Step 1/3: Scanning source files...")
         print(f"{'='*60}")
 
-        existing = self.db.get_all_tasks()
+        existing = self.db.get_classes()
         if existing:
             print(f"  [skip] Already have {len(existing)} classes in DB")
         else:
             self._scan_source(directory)
-            existing = self.db.get_all_tasks()
+            existing = self.db.get_classes()
             if not existing:
                 print("  Error: No classes found after scanning.")
                 return False
@@ -281,7 +289,7 @@ class Pipeline:
         print(f"{'='*60}")
 
         # Was the class found in the last scan?
-        task = self.db.get_task(class_name)
+        task = self.db.get_entity(class_name)
         if not task:
             # Manual one-off registration via the legacy `classes` table
             # is gone with Phase 7 — to focus on a single class, run
@@ -325,7 +333,7 @@ class Pipeline:
         print(f"    Classes: {module_info['class_count']}")
 
         # Dependencies summary
-        deps = self.db.get_dependencies()
+        deps = self.db.get_relationships()
         if deps:
             print(f"    Dependencies: {len(deps)} relationships")
 
