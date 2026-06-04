@@ -9,7 +9,9 @@ Key insight:
   - Pipeline doesn't care "how to call AI", just calls llm.generate(prompt)
 ═══════════════════════════════════════
 """
+import hashlib
 import json
+import os
 import time
 import urllib.request
 import urllib.error
@@ -31,11 +33,31 @@ class LLMClient:
     """
 
     def __init__(self, api_url=None, api_key=None, model=None,
-                 api_format=None):
+                 api_format=None, cache=None):
         self.api_url = api_url or LLM_API_URL
         self.api_key = api_key or LLM_API_KEY
         self.model = model or LLM_MODEL
         self.api_format = api_format or LLM_API_FORMAT
+        # Optional response cache: any object exposing
+        #   llm_cache_get(prompt_hash, model) → response str or None
+        #   llm_cache_put(prompt_hash, model, response)
+        # Setting env LLM_NO_CACHE=1 forces a fresh call (for debugging
+        # prompt changes that don't change prompt text).
+        self.cache = cache
+        self.cache_disabled = bool(os.environ.get('LLM_NO_CACHE'))
+
+    def _prompt_hash(self, prompt, system_prompt):
+        """Stable fingerprint of an LLM call. Includes both the user
+        and system prompt, plus the model, so changing the model or
+        either prompt yields a different cache key.
+        """
+        h = hashlib.sha256()
+        h.update(self.model.encode())
+        h.update(b'\x00')
+        h.update((system_prompt or '').encode())
+        h.update(b'\x00')
+        h.update(prompt.encode())
+        return h.hexdigest()
 
     def generate(self, prompt, system_prompt="", tag=""):
         """
@@ -49,9 +71,34 @@ class LLMClient:
         Returns:
             str | None — AI response text, or None on failure
         """
+        # ── cache lookup ─────────────────────────────────
+        if self.cache is not None and not self.cache_disabled:
+            try:
+                key = self._prompt_hash(prompt, system_prompt)
+                hit = self.cache.llm_cache_get(key, self.model)
+                if hit is not None:
+                    if tag:
+                        print(f"    [{tag}] cache hit")
+                    return hit
+            except Exception:
+                pass    # cache failure must not block the call
+
+        # ── miss → real API call ─────────────────────────
         if self.api_format == "anthropic":
-            return self._api_call_anthropic(prompt, system_prompt)
-        return self._api_call_openai(prompt, system_prompt)
+            response = self._api_call_anthropic(prompt, system_prompt)
+        else:
+            response = self._api_call_openai(prompt, system_prompt)
+
+        # ── write through ────────────────────────────────
+        if (response is not None
+                and self.cache is not None
+                and not self.cache_disabled):
+            try:
+                key = self._prompt_hash(prompt, system_prompt)
+                self.cache.llm_cache_put(key, self.model, response)
+            except Exception:
+                pass
+        return response
 
     # ─── OpenAI-Compatible Backend ──────────────────────────────
 

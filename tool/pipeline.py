@@ -44,7 +44,7 @@ class Pipeline:
         self.db = DBManager(DB_PATH)
         self.reader = SourceReader(source_root or SOURCE_ROOT, db=self.db)
         self.prompts = self._init_prompt_builder()
-        self.llm = LLMClient()
+        self.llm = LLMClient(cache=self.db)
 
         # 3 agents — each shares the same LLM and DB
         self.scanner = ScannerAgent(

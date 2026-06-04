@@ -167,6 +167,19 @@ class DBManager:
                     aliases_json        TEXT NOT NULL,
                     cached_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+
+                /* ── llm_cache: prompt hash → response. Skips API
+                   calls when an identical prompt+model has already
+                   been answered. Saves $ and time across re-runs of
+                   `analyze` (especially while iterating prompts).
+                   Set LLM_NO_CACHE=1 to force a fresh call. */
+                CREATE TABLE IF NOT EXISTS llm_cache (
+                    prompt_hash         TEXT NOT NULL,
+                    model               TEXT NOT NULL,
+                    response            TEXT NOT NULL,
+                    cached_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (prompt_hash, model)
+                );
             """)
             conn.commit()
         finally:
@@ -451,3 +464,27 @@ class DBManager:
     def cache_clear(self):
         """Wipe the parse cache (e.g. when parser logic changes)."""
         self._execute("DELETE FROM parse_cache")
+
+    # ─── LLM response cache ─────────────────────────────────
+
+    def llm_cache_get(self, prompt_hash, model):
+        """Return the cached response string, or None on miss."""
+        row = self._query_one(
+            "SELECT response FROM llm_cache "
+            "WHERE prompt_hash = ? AND model = ?",
+            (prompt_hash, model))
+        return row['response'] if row else None
+
+    def llm_cache_put(self, prompt_hash, model, response):
+        """Upsert one cached response."""
+        self._execute("""
+            INSERT INTO llm_cache (prompt_hash, model, response)
+            VALUES (?, ?, ?)
+            ON CONFLICT(prompt_hash, model) DO UPDATE SET
+                response = excluded.response,
+                cached_at = CURRENT_TIMESTAMP
+        """, (prompt_hash, model, response))
+
+    def llm_cache_clear(self):
+        """Wipe the LLM response cache."""
+        self._execute("DELETE FROM llm_cache")
