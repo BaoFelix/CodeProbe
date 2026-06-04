@@ -1,5 +1,4 @@
-"""report — HTML report generation package (three-layer diagnostic architecture)."""
+"""Report package — interactive Cytoscape.js-based architecture view."""
 from .generator import generate_html_report
-from .focus_report import generate_focus_report
 
-__all__ = ['generate_html_report', 'generate_focus_report']
+__all__ = ['generate_html_report']

@@ -16,7 +16,6 @@ from .config import (
     PROJECT_ROOT, DB_PATH, OUTPUTS_DIR,
     SOURCE_ROOT, DEFAULT_MODULE
 )
-from .report import generate_focus_report
 from .db import DBManager
 from .source_io import SourceReader
 from .prompts import PromptBuilder
@@ -299,11 +298,16 @@ class Pipeline:
 
         result = self.resp_agent.run(class_name)
         if result:
-            # Generate standalone HTML report
-            report_path = OUTPUTS_DIR / f"focus_{class_name}.html"
-            generate_focus_report(self.db, class_name, report_path)
+            # The interactive report already covers the deep-dive view —
+            # clicking a node shows its full relationship + evidence
+            # panel. We just point the user at it with the class pre-
+            # selectable via URL hash.
+            from .report.generator import generate_html_report
+            safe = class_name.replace(':', '_').replace('/', '_')
+            report_path = OUTPUTS_DIR / f"focus_{safe}.html"
+            generate_html_report(self.db, report_path)
             print(f"\n  Focus analysis complete for {class_name}")
-            print(f"  Report: {report_path}")
+            print(f"  Report: {report_path}#node={class_name}")
         return bool(result)
 
     def generate_report(self):
