@@ -8,7 +8,9 @@ will be added in a follow-up step.
 """
 from pathlib import Path
 from dataclasses import asdict
+from concurrent.futures import ProcessPoolExecutor
 import json
+import os
 import re
 import tree_sitter_cpp
 from tree_sitter import Language, Parser, Query, QueryCursor
@@ -22,6 +24,22 @@ def _entity_to_dict(e):
 
 def _rel_to_dict(r):
     return asdict(r)
+
+
+def _parse_one_file(path_str):
+    """Top-level worker — picklable, runs in either main or subprocess.
+    Returns (entities, relationships, aliases). Re-importing this module
+    in a subprocess re-initializes the module-level Parser, which is
+    what we want (each process gets its own tree-sitter state).
+    """
+    path = Path(path_str)
+    if path.suffix in _SCH_EXTS:
+        entities, rels = parse_sch_file(path)
+        aliases = {}
+    else:
+        entities, rels = parse_file(path)
+        aliases = extract_aliases(path)
+    return entities, rels, aliases
 
 
 CPP = Language(tree_sitter_cpp.language())
@@ -747,7 +765,13 @@ def _is_vendored(path, root):
     return any(v in rel_parts for v in _VENDOR_DIRS)
 
 
-def parse_project(root_dir, exclude_vendored=True, cache=None):
+# Below this many cache-miss files, the subprocess startup overhead
+# eats the parallelism win. Tuned by hand on a 4-core laptop; bigger
+# scans benefit linearly, tiny ones stay serial.
+_PARALLEL_THRESHOLD = 20
+
+
+def parse_project(root_dir, exclude_vendored=True, cache=None, workers=None):
     """Parse every C++ file under root_dir and return
     (all_entities, all_relationships, stats) with cross-file
     target_qname resolved wherever possible.
@@ -761,11 +785,13 @@ def parse_project(root_dir, exclude_vendored=True, cache=None):
     exclude_vendored: skip third-party/bundled directories so their
     code doesn't pollute the dependency graph.
 
-    cache: optional object exposing
-        cache_get(path, mtime, size, parser_version) → row or None
-        cache_put(path, mtime, size, parser_version, e_json, r_json, a_json)
-    Hits skip tree-sitter entirely; misses parse + write through.
-    Fingerprint is (mtime, size, parser_version) — keyed per file.
+    cache: optional object exposing cache_get/cache_put — hits skip
+    tree-sitter entirely. Cache reads/writes stay in the main process;
+    workers do pure parsing.
+
+    workers: None = auto (max(1, cpu_count - 1)); 0 or 1 = serial.
+    Workers below `_PARALLEL_THRESHOLD` cache misses also stay serial
+    because subprocess startup beats the parsing time on small jobs.
     """
     root = Path(root_dir)
     all_entities = []
@@ -775,6 +801,9 @@ def parse_project(root_dir, exclude_vendored=True, cache=None):
     cache_hits = 0
     cache_misses = 0
 
+    # Phase A: walk the tree once, partition into (cache hits) and
+    # (paths needing parse). Cache I/O stays single-threaded in main.
+    misses = []        # list of (path, mtime, size)
     for path in sorted(root.rglob('*')):
         if not path.is_file() or path.suffix not in _ALL_EXTS:
             continue
@@ -782,48 +811,65 @@ def parse_project(root_dir, exclude_vendored=True, cache=None):
             skipped_vendored += 1
             continue
 
-        # ── cache lookup ─────────────────────────────────
-        entities = rels = file_aliases = None
-        mtime = size = None
+        # cache lookup
         if cache is not None:
             try:
                 st = path.stat()
                 mtime, size = st.st_mtime, st.st_size
                 row = cache.cache_get(path, mtime, size, PARSER_VERSION)
                 if row is not None:
-                    entities = [Entity(**d) for d in json.loads(row['entities_json'])]
-                    rels = [Relationship(**d) for d in json.loads(row['relationships_json'])]
-                    file_aliases = json.loads(row['aliases_json'])
+                    all_entities.extend(
+                        Entity(**d) for d in json.loads(row['entities_json']))
+                    all_relationships.extend(
+                        Relationship(**d) for d in json.loads(row['relationships_json']))
+                    alias_map.update(json.loads(row['aliases_json']))
                     cache_hits += 1
+                    continue
+                misses.append((path, mtime, size))
             except Exception:
-                pass    # Cache failure should never block the scan
+                misses.append((path, None, None))
+        else:
+            misses.append((path, None, None))
 
-        # ── cache miss → real parse ──────────────────────
-        if entities is None:
-            try:
-                if path.suffix in _SCH_EXTS:
-                    entities, rels = parse_sch_file(path)
-                    file_aliases = {}
-                else:
-                    entities, rels = parse_file(path)
-                    file_aliases = extract_aliases(path)
-            except Exception as exc:
-                print(f"  ⚠ parse failed for {path}: {exc}")
-                continue
-            cache_misses += 1
-            if cache is not None and mtime is not None:
+    # Phase B: parse the misses, possibly in parallel.
+    if workers is None:
+        workers = max(1, (os.cpu_count() or 2) - 1)
+    use_pool = bool(workers and workers >= 2 and len(misses) >= _PARALLEL_THRESHOLD)
+    parsed = []        # list of (path, mtime, size, entities, rels, aliases)
+
+    if use_pool:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_parse_one_file, str(p)): (p, m, s)
+                       for (p, m, s) in misses}
+            for fut, (p, m, s) in futures.items():
                 try:
-                    cache.cache_put(
-                        path, mtime, size, PARSER_VERSION,
-                        json.dumps([_entity_to_dict(e) for e in entities]),
-                        json.dumps([_rel_to_dict(r) for r in rels]),
-                        json.dumps(file_aliases))
-                except Exception:
-                    pass    # again — caching is best-effort
+                    e, r, a = fut.result()
+                    parsed.append((p, m, s, e, r, a))
+                except Exception as exc:
+                    print(f"  ⚠ parse failed for {p}: {exc}")
+    else:
+        for (p, m, s) in misses:
+            try:
+                e, r, a = _parse_one_file(str(p))
+                parsed.append((p, m, s, e, r, a))
+            except Exception as exc:
+                print(f"  ⚠ parse failed for {p}: {exc}")
 
-        alias_map.update(file_aliases)
-        all_entities.extend(entities)
-        all_relationships.extend(rels)
+    # Phase C: write through to cache (main thread) and accumulate.
+    for (p, m, s, e, r, a) in parsed:
+        cache_misses += 1
+        if cache is not None and m is not None:
+            try:
+                cache.cache_put(
+                    p, m, s, PARSER_VERSION,
+                    json.dumps([_entity_to_dict(x) for x in e]),
+                    json.dumps([_rel_to_dict(x) for x in r]),
+                    json.dumps(a))
+            except Exception:
+                pass
+        all_entities.extend(e)
+        all_relationships.extend(r)
+        alias_map.update(a)
 
     # ── alias expansion: rewrite relationship targets through aliases ─
     # e.g. target_name 'sink_ptr' → alias chain → 'sink'. If an alias
@@ -903,4 +949,5 @@ def parse_project(root_dir, exclude_vendored=True, cache=None):
                                 if e.kind != 'interface' and e.attrs.get('abstract')),
         'cache_hits': cache_hits,
         'cache_misses': cache_misses,
+        'workers': workers if use_pool else 1,
     }
