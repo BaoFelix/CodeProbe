@@ -74,10 +74,13 @@ CST 抽象语法树
 
 | 文件 | 职责 |
 |---|---|
-| `tool/ts_parser.py` | tree-sitter 解析、实体抽取、关系抽取、跨文件解析 |
-| `tool/model.py` | Entity / Relationship 数据类(7 种 kind 的唯一定义在此) |
-| `tool/db.py` | SQLite schema 和读写 API(新表 entities/relationships,旧表保留兼容) |
-| `tool/workflow.py` | 建图、orchestrator 打分、SCC 缩点、抽象折叠、支配树、职责树 |
+| `tool/ts_parser.py` | tree-sitter 解析 / 实体抽取 / 关系抽取 / 跨文件解析。包含 `.sch` 私有 DSL 的 regex 兜底路径(`parse_sch_file`)。 |
+| `tool/model.py` | Entity / Relationship 数据类(6 种 kind 的唯一定义在此) |
+| `tool/db.py` | 只有 entities + relationships + responsibility_analysis + design_proposals + module_info 表。API 干净到 4 个查询入口:`get_entities` / `get_entity` / `get_classes` / `get_relationships`。 |
+| `tool/source_io.py` | 文件 IO(encoding 探测、按 qualified_name 查文件路径)。85 行,替代旧 reader.py 的非解析部分。 |
+| `tool/workflow.py` | 建图 / orchestrator 打分 / SCC 缩点 / 抽象折叠 / 支配树 / 职责树 / 架构风格检测(oop / mixed / crtp)。 |
+| `tool/agents.py` | ScannerAgent(用引擎)、ResponsibilityAgent(LLM 喂上下文)、DesignAgent(LLM 出方案)。 |
+| `tool/report/row_shapes.py` | 把 db.py 的自然行重塑成报告层期望的字典字段名。**适配住在消费者那一侧**,不让数据层背展示层的词汇。 |
 
 ---
 
@@ -164,6 +167,9 @@ score = weighted_out_degree + 0.5 × reach − 0.8 × weighted_in_degree
 | **第三方目录** | 默认排除 vendored/bundled | 一律纳入 | 内嵌的 fmt 库污染 spdlog 的 orchestrator 排名 |
 | **导出宏** | 解析前抹掉 | 让 tree-sitter 直面 | 不抹会把 `SPDLOG_API` / `Standard_EXPORT` 当类名/类型,整个类体丢失 |
 | **CRTP/模板风格** | 检测后告警,不强行打分 | 改打分公式覆盖两种风格 | CRTP 颠倒了"orchestrator = 高出度"的假设;两套公式让两边都半吊子;诚实告警>装作通用 |
+| **`.sch` 私有 DSL** | regex 路径单独处理,但产出同样的 Entity/Relationship | 写 grammar / 一律按 C++ 强解析 | grammar 过度工程;按 C++ 解析会崩(superclass/forward_declare 关键字不存在);regex 限制清楚地写在 docstring 里 |
+| **删旧表 + 删旧 API** | 一次性删干净 | 保留兼容适配层 | 半吊子重构最坏(名字旧、底层新、看的人困惑);彻底删让 db.py 只有 entities/relationships 一个真相 |
+| **适配住消费者一侧** | 报告层在自己包内的 `row_shapes.py` 重塑 | 数据层背展示层字段名 | 字段名 `class_name`/`level_name` 是报告的词汇;让数据层用展示层的词汇 = 让低层迁就高层 = 倒挂 |
 
 ---
 
@@ -179,7 +185,7 @@ score = weighted_out_degree + 0.5 × reach − 0.8 × weighted_in_degree
 6. **OCCT 风格的 namespace 命名空间共享类名**:有时同一短名在多个深层 namespace 下都存在,目前会被标 ambiguous 而不解析。
 7. **Orchestrator 打分公式系数**写死(`+0.5×reach`、`-0.8×in`),没做项目自适应。
 8. **CRTP / 模板元编程项目不在甜区** — Eigen 这类代码的"架构核心"是被继承的基类(高入度、低出度),跟我们打分公式的假设相反。我们用 `detect_style` 主动告警 `style='crtp'` 提示用户绕过 orchestrator 排行榜,直接看 inherits 家族。**不试图用一套公式覆盖两种风格,因为这只会让两边都半吊子。**
-9. **DB 写入未接入** — 引擎能跑,但还没把 entities/relationships 真正写进 SQLite(Phase 5b 的工作)。
+9. **`.sch` 方法不抽** — 私有 DSL 的方法签名形态太多变,regex 路径只抽类 + 继承 + 字段。**对架构分析够用**,要看方法细节就回退到 .hxx。
 
 ---
 
