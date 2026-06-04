@@ -163,6 +163,7 @@ score = weighted_out_degree + 0.5 × reach − 0.8 × weighted_in_degree
 | **抽象折叠** | 默认折叶子(`leaves`)+ ≥2 家族 | 默认折到顶 | 折到顶把 OCCT 几何分类压平成一坨;只折叶子保留中间分类层 |
 | **第三方目录** | 默认排除 vendored/bundled | 一律纳入 | 内嵌的 fmt 库污染 spdlog 的 orchestrator 排名 |
 | **导出宏** | 解析前抹掉 | 让 tree-sitter 直面 | 不抹会把 `SPDLOG_API` / `Standard_EXPORT` 当类名/类型,整个类体丢失 |
+| **CRTP/模板风格** | 检测后告警,不强行打分 | 改打分公式覆盖两种风格 | CRTP 颠倒了"orchestrator = 高出度"的假设;两套公式让两边都半吊子;诚实告警>装作通用 |
 
 ---
 
@@ -177,7 +178,8 @@ score = weighted_out_degree + 0.5 × reach − 0.8 × weighted_in_degree
 5. **接口规则**:基于"全纯虚 + 无字段"。C++23 concepts、模板基类(SFINAE 接口)未覆盖。
 6. **OCCT 风格的 namespace 命名空间共享类名**:有时同一短名在多个深层 namespace 下都存在,目前会被标 ambiguous 而不解析。
 7. **Orchestrator 打分公式系数**写死(`+0.5×reach`、`-0.8×in`),没做项目自适应。
-8. **DB 写入未接入** — 引擎能跑,但还没把 entities/relationships 真正写进 SQLite(Phase 5b 的工作)。
+8. **CRTP / 模板元编程项目不在甜区** — Eigen 这类代码的"架构核心"是被继承的基类(高入度、低出度),跟我们打分公式的假设相反。我们用 `detect_style` 主动告警 `style='crtp'` 提示用户绕过 orchestrator 排行榜,直接看 inherits 家族。**不试图用一套公式覆盖两种风格,因为这只会让两边都半吊子。**
+9. **DB 写入未接入** — 引擎能跑,但还没把 entities/relationships 真正写进 SQLite(Phase 5b 的工作)。
 
 ---
 

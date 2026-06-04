@@ -120,6 +120,55 @@ def classify_utility(g, n):
     return in_deg >= 2 and out_deg == 0 and reach == 0
 
 
+# ── Architecture-style detection ──────────────────────────────
+# Our orchestrator scoring assumes traditional OOP: orchestrators have
+# high out-degree (they coordinate others) and low in-degree (they're
+# not heavily depended upon). This assumption inverts on CRTP-heavy /
+# template-metaprogramming codebases like Eigen: the architectural cores
+# (MatrixBase, EigenBase) are BASE classes — high in-degree, low
+# out-degree — so our formula scores them as utilities instead of cores.
+#
+# We don't try to fix scoring for both worlds at once. Instead, we
+# detect the style and warn the caller when our default scoring is
+# unlikely to be meaningful.
+
+def detect_style(entities, relationships, g):
+    """Return (style, note) describing how appropriate the default
+    orchestrator scoring is for this codebase.
+
+    style: 'oop' | 'crtp' | 'mixed'
+    note:  a short, human-readable explanation
+    """
+    classes = sum(1 for e in entities
+                  if e.kind in ('class', 'struct', 'interface'))
+    abstractions = sum(1 for e in entities
+                       if e.kind == 'interface' or e.attrs.get('abstract'))
+    inherits_edges = sum(1 for _, _, d in g.edges(data=True)
+                         if 'inherits' in d.get('kinds', set())
+                         or 'implements' in d.get('kinds', set()))
+
+    # Signal: lots of inheritance, but almost no virtual abstraction
+    # (no interfaces, no abstract base classes). Classic CRTP fingerprint.
+    if classes >= 50 and inherits_edges >= 20:
+        abs_ratio = abstractions / max(classes, 1)
+        if abs_ratio < 0.02:                            # <2% abstract
+            return ('crtp',
+                    f"CRTP / template-metaprogramming style detected "
+                    f"({abstractions}/{classes} abstract, {inherits_edges} inherits). "
+                    "Default orchestrator scoring assumes traditional OOP "
+                    "(high out-degree = coordinator). In CRTP code the "
+                    "architectural cores are base classes — high in-degree, "
+                    "low out-degree — so they appear as utilities under the "
+                    "default scoring. Inspect the most-inherited base "
+                    "classes directly instead of the top-scored orchestrators.")
+        if abs_ratio < 0.05:
+            return ('mixed',
+                    f"Mostly concrete inheritance ({abstractions}/{classes} "
+                    "abstract). Orchestrator ranking may include template "
+                    "bases that aren't coordinators in the traditional sense.")
+    return ('oop', '')
+
+
 # ── Abstraction folding: a base represents its implementers ───
 
 def _parent_map(g):
