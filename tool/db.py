@@ -150,6 +150,23 @@ class DBManager:
                 CREATE INDEX IF NOT EXISTS idx_rel_source ON relationships(source_qname);
                 CREATE INDEX IF NOT EXISTS idx_rel_target ON relationships(target_qname);
                 CREATE INDEX IF NOT EXISTS idx_rel_kind   ON relationships(kind);
+
+                /* ── parse_cache: file-content fingerprint → parsed
+                   data (entities + relationships + aliases). Lets us
+                   skip tree-sitter on files whose mtime+size are
+                   unchanged between scans. Bump `version` when the
+                   parser logic changes so stale caches don't survive
+                   a code update. */
+                CREATE TABLE IF NOT EXISTS parse_cache (
+                    file_path           TEXT PRIMARY KEY,
+                    mtime               REAL NOT NULL,
+                    size                INTEGER NOT NULL,
+                    parser_version      INTEGER NOT NULL,
+                    entities_json       TEXT NOT NULL,
+                    relationships_json  TEXT NOT NULL,
+                    aliases_json        TEXT NOT NULL,
+                    cached_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
             """)
             conn.commit()
         finally:
@@ -385,7 +402,10 @@ class DBManager:
             "ORDER BY qualified_name")
 
     def clear_graph(self):
-        """Wipe entities + relationships (called on re-scan)."""
+        """Wipe entities + relationships (called on re-scan).
+        Parse cache survives — it's keyed on file fingerprint so it
+        stays valid across re-scans of the same source tree.
+        """
         conn = self._connect()
         try:
             cur = conn.cursor()
@@ -394,3 +414,40 @@ class DBManager:
             conn.commit()
         finally:
             conn.close()
+
+    # ─── Parse cache (file fingerprint → parsed result) ─────
+
+    def cache_get(self, file_path, mtime, size, parser_version):
+        """Return cached parse output for this file if fingerprint
+        matches, else None. Caller deserializes the JSON columns.
+        """
+        row = self._query_one(
+            "SELECT entities_json, relationships_json, aliases_json "
+            "FROM parse_cache "
+            "WHERE file_path = ? AND mtime = ? AND size = ? "
+            "  AND parser_version = ?",
+            (str(file_path), mtime, size, parser_version))
+        return row
+
+    def cache_put(self, file_path, mtime, size, parser_version,
+                  entities_json, relationships_json, aliases_json):
+        """Upsert one file's cache entry."""
+        self._execute("""
+            INSERT INTO parse_cache (file_path, mtime, size,
+                                      parser_version, entities_json,
+                                      relationships_json, aliases_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(file_path) DO UPDATE SET
+                mtime = excluded.mtime,
+                size = excluded.size,
+                parser_version = excluded.parser_version,
+                entities_json = excluded.entities_json,
+                relationships_json = excluded.relationships_json,
+                aliases_json = excluded.aliases_json,
+                cached_at = CURRENT_TIMESTAMP
+        """, (str(file_path), mtime, size, parser_version,
+              entities_json, relationships_json, aliases_json))
+
+    def cache_clear(self):
+        """Wipe the parse cache (e.g. when parser logic changes)."""
+        self._execute("DELETE FROM parse_cache")

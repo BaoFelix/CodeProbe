@@ -7,11 +7,21 @@ Right now this handles namespaces, classes, structs. Methods and fields
 will be added in a follow-up step.
 """
 from pathlib import Path
+from dataclasses import asdict
+import json
 import re
 import tree_sitter_cpp
 from tree_sitter import Language, Parser, Query, QueryCursor
 
 from .model import Entity, Relationship
+
+
+def _entity_to_dict(e):
+    return asdict(e)
+
+
+def _rel_to_dict(r):
+    return asdict(r)
 
 
 CPP = Language(tree_sitter_cpp.language())
@@ -559,6 +569,12 @@ def _ancestor_types(node):
 
 # ── Project-wide parsing & resolution ────────────────────────
 
+# Bump when parser logic changes so cached entries get invalidated.
+# Any edit to parse_file / parse_sch_file / extract_aliases /
+# classify_field_type / _refine_class_kinds should bump this.
+PARSER_VERSION = 1
+
+
 _CPP_EXTS = {'.h', '.hxx', '.hpp', '.cxx', '.cpp', '.c'}
 # .sch is a private DSL with two custom keywords (`superclass Parent`
 # and `forward_declare class X;`) that tree-sitter-cpp won't parse.
@@ -731,7 +747,7 @@ def _is_vendored(path, root):
     return any(v in rel_parts for v in _VENDOR_DIRS)
 
 
-def parse_project(root_dir, exclude_vendored=True):
+def parse_project(root_dir, exclude_vendored=True, cache=None):
     """Parse every C++ file under root_dir and return
     (all_entities, all_relationships, stats) with cross-file
     target_qname resolved wherever possible.
@@ -744,12 +760,20 @@ def parse_project(root_dir, exclude_vendored=True):
 
     exclude_vendored: skip third-party/bundled directories so their
     code doesn't pollute the dependency graph.
+
+    cache: optional object exposing
+        cache_get(path, mtime, size, parser_version) → row or None
+        cache_put(path, mtime, size, parser_version, e_json, r_json, a_json)
+    Hits skip tree-sitter entirely; misses parse + write through.
+    Fingerprint is (mtime, size, parser_version) — keyed per file.
     """
     root = Path(root_dir)
     all_entities = []
     all_relationships = []
     alias_map = {}          # short_name → target type text (project-wide)
     skipped_vendored = 0
+    cache_hits = 0
+    cache_misses = 0
 
     for path in sorted(root.rglob('*')):
         if not path.is_file() or path.suffix not in _ALL_EXTS:
@@ -757,17 +781,47 @@ def parse_project(root_dir, exclude_vendored=True):
         if exclude_vendored and _is_vendored(path, root):
             skipped_vendored += 1
             continue
-        try:
-            if path.suffix in _SCH_EXTS:
-                entities, rels = parse_sch_file(path)
-                # .sch has no `using`/`typedef` — skip alias extraction.
-            else:
-                entities, rels = parse_file(path)
-                alias_map.update(extract_aliases(path))
-        except Exception as exc:
-            # Don't let one bad file kill the whole scan.
-            print(f"  ⚠ parse failed for {path}: {exc}")
-            continue
+
+        # ── cache lookup ─────────────────────────────────
+        entities = rels = file_aliases = None
+        mtime = size = None
+        if cache is not None:
+            try:
+                st = path.stat()
+                mtime, size = st.st_mtime, st.st_size
+                row = cache.cache_get(path, mtime, size, PARSER_VERSION)
+                if row is not None:
+                    entities = [Entity(**d) for d in json.loads(row['entities_json'])]
+                    rels = [Relationship(**d) for d in json.loads(row['relationships_json'])]
+                    file_aliases = json.loads(row['aliases_json'])
+                    cache_hits += 1
+            except Exception:
+                pass    # Cache failure should never block the scan
+
+        # ── cache miss → real parse ──────────────────────
+        if entities is None:
+            try:
+                if path.suffix in _SCH_EXTS:
+                    entities, rels = parse_sch_file(path)
+                    file_aliases = {}
+                else:
+                    entities, rels = parse_file(path)
+                    file_aliases = extract_aliases(path)
+            except Exception as exc:
+                print(f"  ⚠ parse failed for {path}: {exc}")
+                continue
+            cache_misses += 1
+            if cache is not None and mtime is not None:
+                try:
+                    cache.cache_put(
+                        path, mtime, size, PARSER_VERSION,
+                        json.dumps([_entity_to_dict(e) for e in entities]),
+                        json.dumps([_rel_to_dict(r) for r in rels]),
+                        json.dumps(file_aliases))
+                except Exception:
+                    pass    # again — caching is best-effort
+
+        alias_map.update(file_aliases)
         all_entities.extend(entities)
         all_relationships.extend(rels)
 
@@ -847,4 +901,6 @@ def parse_project(root_dir, exclude_vendored=True):
         'interfaces': sum(1 for e in all_entities if e.kind == 'interface'),
         'abstract_classes': sum(1 for e in all_entities
                                 if e.kind != 'interface' and e.attrs.get('abstract')),
+        'cache_hits': cache_hits,
+        'cache_misses': cache_misses,
     }

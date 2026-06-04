@@ -70,7 +70,7 @@ class ScannerAgent(BaseAgent):
         print(f"\n  [ScannerAgent] Scanning with tree-sitter engine...")
 
         scan_dir = Path(directory) if directory else self.reader.source_root
-        entities, relationships, stats = parse_project(str(scan_dir))
+        entities, relationships, stats = parse_project(str(scan_dir), cache=self.db)
 
         if not entities:
             print(f"  ⚠ No C++ entities found.")
@@ -107,6 +107,7 @@ class ScannerAgent(BaseAgent):
               f"files={stats['files_parsed']}")
         print(f"  ✓ resolved cross-file: {stats['resolved_cross_file']}, "
               f"aliases expanded: {stats['alias_edges_expanded']}")
+        print(f"  ✓ cache: {stats['cache_hits']} hits, {stats['cache_misses']} misses")
         print(f"  ✓ style: {style}" + (f" — {note[:80]}…" if note else ""))
         print(f"  ✓ top orchestrator candidate: {orchestrator}")
 
