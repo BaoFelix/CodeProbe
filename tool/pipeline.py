@@ -18,7 +18,7 @@ from .config import (
 )
 from .report import generate_focus_report
 from .db import DBManager
-from .reader import FileReader
+from .source_io import SourceReader
 from .prompts import PromptBuilder
 from .llm import LLMClient
 from .agents import ScannerAgent, ResponsibilityAgent, DesignAgent
@@ -42,7 +42,7 @@ class Pipeline:
     def __init__(self, source_root=None):
         # Shared resources
         self.db = DBManager(DB_PATH)
-        self.reader = FileReader(source_root or SOURCE_ROOT)
+        self.reader = SourceReader(source_root or SOURCE_ROOT, db=self.db)
         self.prompts = self._init_prompt_builder()
         self.llm = LLMClient()
 
@@ -280,20 +280,14 @@ class Pipeline:
         print(f"  Focus: {class_name}")
         print(f"{'='*60}")
 
-        # Auto-register if not in DB
+        # Was the class found in the last scan?
         task = self.db.get_task(class_name)
         if not task:
-            header, impl = self.reader.find_class_files(class_name)
-            if header:
-                self.db.register_class(
-                    class_name,
-                    header_path=str(header),
-                    impl_path=str(impl) if impl else None
-                )
-                print(f"  Auto-registered {class_name} from {header.name}")
-            else:
-                print(f"  Error: Cannot find source files for {class_name}")
-                return False
+            # Manual one-off registration via the legacy `classes` table
+            # is gone with Phase 7 — to focus on a single class, run
+            # `analyze` first so it gets parsed into the entity graph.
+            print(f"  Error: {class_name} not in DB. Run 'analyze' first.")
+            return False
 
         result = self.resp_agent.run(class_name)
         if result:

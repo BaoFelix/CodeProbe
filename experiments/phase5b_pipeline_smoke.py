@@ -16,7 +16,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tool.db import DBManager
-from tool.reader import FileReader
+from tool.source_io import SourceReader
 from tool.agents import ScannerAgent
 
 
@@ -30,7 +30,7 @@ def main():
     db = DBManager(DB)
     db.ensure_tables()
 
-    agent = ScannerAgent(llm=None, db=db, reader=FileReader("test_src"), prompts=None)
+    agent = ScannerAgent(llm=None, db=db, reader=SourceReader("test_src", db=db), prompts=None)
     n = agent.run("test_src")
     assert n > 0, "ScannerAgent returned 0 classes"
 

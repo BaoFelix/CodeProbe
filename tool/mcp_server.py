@@ -23,7 +23,7 @@ except ImportError:
 
 from .config import DB_PATH, SOURCE_ROOT, DEFAULT_MODULE, PROJECT_ROOT, OUTPUTS_DIR
 from .db import DBManager
-from .reader import FileReader
+from .source_io import SourceReader
 from .prompts import PromptBuilder
 from .llm import LLMClient
 from .agents import ScannerAgent, ResponsibilityAgent
@@ -51,7 +51,7 @@ def create_mcp_server():
 
     # Shared resources (used by all tools)
     db = DBManager(DB_PATH)
-    reader = FileReader(SOURCE_ROOT)
+    reader = SourceReader(SOURCE_ROOT, db=db)
     llm = LLMClient(backend="api")  # MCP mode uses API backend
 
     # Load skills (align with pipeline.py)
@@ -158,26 +158,6 @@ def create_mcp_server():
             return f"SQL error: {e}"
 
     @mcp.tool()
-    def register_class(
-        class_name: str,
-        header_path: str = "",
-        impl_path: str = ""
-    ) -> str:
-        """
-        Manually register a C++ class to the database.
-        class_name: class name (required)
-        header_path: header file path (optional)
-        impl_path: implementation file path (optional)
-        """
-        db.register_class(
-            class_name,
-            header_path=header_path or None,
-            impl_path=impl_path or None,
-            module=DEFAULT_MODULE
-        )
-        return f"Registered: {class_name}"
-
-    @mcp.tool()
     def generate_report() -> str:
         """Generate HTML diagnostic report from analysis results in database.
         Returns path to generated report.html file."""
@@ -194,6 +174,6 @@ def run_mcp_server():
     server = create_mcp_server()
     if server:
         print("  ✓ MCP Server starting...")
-        print("  Tools: scan_source, analyze_class, get_status, query_db, register_class, generate_report")
+        print("  Tools: scan_source, analyze_class, get_status, query_db, generate_report")
         print("  Waiting for AI Agent connection...")
         server.run()

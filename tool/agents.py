@@ -16,12 +16,11 @@ from datetime import datetime
 
 from .config import OUTPUTS_DIR, MAX_LINES_DIRECT, DEFAULT_MODULE
 from .db import DBManager
-from .reader import FileReader
+from .source_io import SourceReader
 from .prompts import PromptBuilder
 from .llm import LLMClient
 from .ts_parser import parse_project
 from .workflow import build_graph, score_nodes, classify_utility, detect_style
-from .model import LEVEL_OF
 
 
 class BaseAgent:
@@ -87,27 +86,21 @@ class ScannerAgent(BaseAgent):
         else:
             orchestrator = None
 
-        # ── Persist to the NEW entity-relationship tables ────
+        # ── Persist to entity-relationship tables ─────────────
         self.db.clear_graph()
         n_e = self.db.save_entities(entities)
         n_r = self.db.save_relationships(relationships)
 
-        # ── Translate to LEGACY classes/dependencies tables ──
-        # ResponsibilityAgent and the report still query these; we keep
-        # them filled with the SAME data, just reshaped, until Phase 7
-        # removes the legacy path entirely.
-        legacy_classes, legacy_deps = _to_legacy(entities, relationships,
-                                                 orchestrator)
-        self.db.save_classes_batch(legacy_classes)
-        self.db.save_dependencies(legacy_deps)
+        # Class count = how many classes/structs/interfaces we saved.
+        class_count = sum(1 for e in entities
+                          if e.kind in ('class', 'struct', 'interface'))
 
-        # ── Module summary ────────────────────────────────────
         self.db.save_module_info(
             module_name='default',
             directory=str(scan_dir),
             orchestrator=orchestrator,
             file_count=stats['files_parsed'],
-            class_count=len(legacy_classes),
+            class_count=class_count,
         )
 
         print(f"  ✓ entities={n_e}  relationships={n_r}  "
@@ -117,85 +110,18 @@ class ScannerAgent(BaseAgent):
         print(f"  ✓ style: {style}" + (f" — {note[:80]}…" if note else ""))
         print(f"  ✓ top orchestrator candidate: {orchestrator}")
 
-        # Print first few classes with their deps (visual sanity)
-        for cls in legacy_classes[:12]:
-            tgts = [d['target_class'] for d in legacy_deps
-                    if d['source_class'] == cls['class_name']]
+        # Visual sanity: a few classes with their dependencies (via the
+        # legacy-shaped adapters so we see what downstream sees).
+        for cls in self.db.get_all_tasks()[:12]:
+            tgts = [d['target_class']
+                    for d in self.db.get_dependencies(cls['class_name'])]
             arrow = ' → ' + ', '.join(tgts)[:80] if tgts else ''
             hdr = Path(cls['header_path']).name if cls['header_path'] else ''
             print(f"    + {cls['class_name'][:32]:32s} {hdr:22s}{arrow}")
-        if len(legacy_classes) > 12:
-            print(f"    … and {len(legacy_classes)-12} more")
+        if class_count > 12:
+            print(f"    … and {class_count - 12} more")
 
-        return len(legacy_classes)
-
-
-def _to_legacy(entities, relationships, orchestrator):
-    """Reshape new-model entities/relationships into the legacy
-    classes/dependencies rows that ResponsibilityAgent and the report
-    still consume.
-
-    Choices that matter:
-      - 'classes' rows use qualified_name so name collisions across
-        namespaces aren't squashed by the legacy UNIQUE(class_name).
-      - method_count / member_count count this class's direct children
-        only (parent_qname-based), not file-wide totals.
-      - One legacy dependency row per (source, target) pair, picking
-        the strongest level. Multi-edge richness lives in the new
-        relationships table — legacy can't represent it and we don't
-        want to triple-count.
-    """
-    children = {}
-    for e in entities:
-        if e.parent_qname:
-            children.setdefault(e.parent_qname, []).append(e)
-
-    classes = []
-    for e in entities:
-        if e.kind not in ('class', 'struct', 'interface'):
-            continue
-        kids = children.get(e.qualified_name, [])
-        methods = [k for k in kids if k.kind == 'method']
-        fields = [k for k in kids if k.kind == 'field']
-        header = e.file_path
-        impl = None
-        if header:
-            stem = Path(header).with_suffix('')
-            for ext in ('.cxx', '.cpp', '.c'):
-                cand = stem.with_suffix(ext)
-                if cand.exists():
-                    impl = str(cand)
-                    break
-        classes.append({
-            'class_name': e.qualified_name,
-            'header_path': header,
-            'impl_path': impl,
-            'method_count': len(methods),
-            'member_count': len(fields),
-            'line_count': max(0, e.end_line - e.start_line + 1),
-            'is_orchestrator': 1 if e.qualified_name == orchestrator else 0,
-        })
-
-    strongest = {}
-    for r in relationships:
-        if r.target_qname is None:
-            continue
-        key = (r.source_qname, r.target_qname)
-        level = LEVEL_OF[r.kind]
-        cur = strongest.get(key)
-        if cur is None or level > cur[0]:
-            strongest[key] = (level, r.kind, r.evidence_text)
-
-    deps = [{
-        'source_class': src,
-        'target_class': tgt,
-        'level': level,
-        'level_name': f'Lv-{level}',
-        'source_evidence': evidence[:200] if evidence else '',
-        'target_is_external': False,
-    } for (src, tgt), (level, kind, evidence) in strongest.items()]
-
-    return classes, deps
+        return class_count
 
 
 class ResponsibilityAgent(BaseAgent):

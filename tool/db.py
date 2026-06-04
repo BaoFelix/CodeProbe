@@ -75,30 +75,6 @@ class DBManager:
         try:
             cur = conn.cursor()
             cur.executescript("""
-                CREATE TABLE IF NOT EXISTS classes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    class_name TEXT NOT NULL UNIQUE,
-                    module TEXT DEFAULT 'default',
-                    header_path TEXT,
-                    impl_path TEXT,
-                    method_count INTEGER DEFAULT 0,
-                    member_count INTEGER DEFAULT 0,
-                    line_count INTEGER DEFAULT 0,
-                    is_orchestrator INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-
-                CREATE TABLE IF NOT EXISTS dependencies (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source_class TEXT NOT NULL,
-                    target_class TEXT NOT NULL,
-                    level INTEGER NOT NULL,
-                    level_name TEXT NOT NULL,
-                    source_evidence TEXT,
-                    target_is_external INTEGER DEFAULT 0,
-                    UNIQUE(source_class, target_class)
-                );
-
                 CREATE TABLE IF NOT EXISTS module_info (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     module_name TEXT NOT NULL,
@@ -133,10 +109,13 @@ class DBManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
 
-                /* ── new entity-relationship model (Phase 1) ────────────
-                   Replaces classes/dependencies once the migration is
-                   complete. For now coexists with old tables; readers
-                   should prefer entities/relationships when both exist. */
+                /* ── entity-relationship model ──────────────────────────
+                   The whole graph lives here. Legacy `classes` and
+                   `dependencies` tables were removed in Phase 7;
+                   db.get_dependencies() / get_all_tasks() now read
+                   from these and reshape to the old return form so
+                   the existing callers (ResponsibilityAgent, report,
+                   pipeline) keep working. */
 
                 CREATE TABLE IF NOT EXISTS entities (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -179,114 +158,87 @@ class DBManager:
 
     # ─── Class Registration ──────────────────────────────────
 
-    def register_class(self, class_name, header_path=None, impl_path=None,
-                       module='default', method_count=0, member_count=0,
-                       line_count=0, is_orchestrator=False):
-        """Register a class (upsert: update if exists, insert if not)."""
-        conn = self._connect()
-        try:
-            cur = conn.cursor()
-            existing = cur.execute(
-                "SELECT id FROM classes WHERE class_name = ?",
-                (class_name,)
-            ).fetchone()
+    # ─── Class / dependency reads (read from the new graph tables) ──
+    #
+    # The legacy `classes` and `dependencies` tables were removed in
+    # Phase 7. The function names stay because ResponsibilityAgent, the
+    # report, and the pipeline still call them — they're now thin
+    # adapters that query entities / relationships and reshape the rows
+    # to the legacy dict shape downstream expects.
 
-            if existing:
-                cur.execute("""
-                    UPDATE classes
-                    SET header_path = COALESCE(?, header_path),
-                        impl_path = COALESCE(?, impl_path),
-                        module = ?,
-                        method_count = ?,
-                        member_count = ?,
-                        line_count = ?,
-                        is_orchestrator = ?
-                    WHERE class_name = ?
-                """, (str(header_path) if header_path else None,
-                      str(impl_path) if impl_path else None,
-                      module, method_count, member_count, line_count,
-                      1 if is_orchestrator else 0,
-                      class_name))
-                conn.commit()
-                return existing['id']
+    @staticmethod
+    def _class_row_from_entity(row, orchestrator=None):
+        """Reshape an entities-table row (kind in class/struct/interface)
+        into the legacy `classes` row dict downstream code expects."""
+        return {
+            'id': row['id'],
+            'class_name': row['qualified_name'],
+            'module': 'default',
+            'header_path': row['file_path'],
+            'impl_path': None,    # filled by source_io when needed
+            'method_count': 0,    # filled below by caller if it cares
+            'member_count': 0,
+            'line_count': max(0, (row['end_line'] or 0) - (row['start_line'] or 0) + 1),
+            'is_orchestrator': 1 if orchestrator and row['qualified_name'] == orchestrator else 0,
+        }
 
-            cur.execute("""
-                INSERT INTO classes
-                    (class_name, header_path, impl_path, module,
-                     method_count, member_count, line_count, is_orchestrator)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (class_name,
-                  str(header_path) if header_path else None,
-                  str(impl_path) if impl_path else None,
-                  module, method_count, member_count, line_count,
-                  1 if is_orchestrator else 0))
-            conn.commit()
-            return cur.lastrowid
-        finally:
-            conn.close()
-
-    def save_classes_batch(self, class_list):
-        """Batch write classes table. class_list = [dict, ...].
-        Uses INSERT OR REPLACE for upsert semantics. Single connection + commit."""
-        if not class_list:
-            return
-        conn = self._connect()
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.executemany("""
-                INSERT OR REPLACE INTO classes
-                    (class_name, module, header_path, impl_path,
-                     method_count, member_count, line_count, is_orchestrator)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, [(c['class_name'], c.get('module', 'default'),
-                   str(c['header_path']) if c.get('header_path') else None,
-                   str(c['impl_path']) if c.get('impl_path') else None,
-                   c.get('method_count', 0), c.get('member_count', 0),
-                   c.get('line_count', 0), c.get('is_orchestrator', 0))
-                  for c in class_list])
-            conn.commit()
-        finally:
-            conn.close()
-
-    # ─── Dependencies ────────────────────────────────────────
-
-    def save_dependencies(self, deps_list):
-        """Save a list of dependency records using executemany (batch). Each item: dict with
-        source_class, target_class, level, level_name, source_evidence, target_is_external."""
-        if not deps_list:
-            return
-        conn = self._connect()
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.executemany("""
-                INSERT OR REPLACE INTO dependencies
-                    (source_class, target_class, level, level_name,
-                     source_evidence, target_is_external)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, [(dep['source_class'], dep['target_class'],
-                   dep['level'], dep['level_name'],
-                   dep.get('source_evidence', ''),
-                   1 if dep.get('target_is_external') else 0)
-                  for dep in deps_list])
-            conn.commit()
-        finally:
-            conn.close()
+    @staticmethod
+    def _dep_row_from_relationship(row):
+        """Reshape a relationships-table row into the legacy dependency
+        dict (one row per edge — multi-edge richness stays in the new
+        table, this view shows the strongest only via highest level)."""
+        return {
+            'id': row['id'],
+            'source_class': row['source_qname'],
+            'target_class': row['target_qname'] or row['target_name'],
+            'level': row['level'],
+            'level_name': f'Lv-{row["level"]}',
+            'source_evidence': (row['evidence_text'] or '')[:200],
+            'target_is_external': 0 if row['target_qname'] else 1,
+        }
 
     def get_dependencies(self, source_class=None):
-        """Get dependencies. If source_class given, filter by it."""
+        """Strongest edge per (source, target) pair, optionally filtered
+        by source. Reads relationships, collapses multi-edges to the
+        highest level (the legacy shape can't carry multiple).
+        """
         if source_class:
-            return self._query_all(
-                "SELECT * FROM dependencies WHERE source_class = ? ORDER BY level",
-                (source_class,)
-            )
-        return self._query_all("SELECT * FROM dependencies ORDER BY source_class, level")
+            rows = self._query_all(
+                "SELECT * FROM relationships WHERE source_qname = ? "
+                "ORDER BY level DESC",
+                (source_class,))
+        else:
+            rows = self._query_all(
+                "SELECT * FROM relationships ORDER BY source_qname, level DESC")
+        # Collapse to strongest per (source, target).
+        seen = set()
+        out = []
+        for r in rows:
+            key = (r['source_qname'], r['target_qname'] or r['target_name'])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(self._dep_row_from_relationship(r))
+        out.sort(key=lambda d: d['level'])
+        return out
 
     def get_dependents_of_class(self, class_name):
-        """Get classes that depend ON this class (incoming dependencies)."""
-        return self._query_all(
-            "SELECT * FROM dependencies WHERE target_class = ? ORDER BY level",
-            (class_name,)
-        )
+        """Incoming edges to a class. Same collapse rule as
+        get_dependencies."""
+        rows = self._query_all(
+            "SELECT * FROM relationships WHERE target_qname = ? "
+            "ORDER BY level DESC",
+            (class_name,))
+        seen = set()
+        out = []
+        for r in rows:
+            key = (r['source_qname'], r['target_qname'] or r['target_name'])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(self._dep_row_from_relationship(r))
+        out.sort(key=lambda d: d['level'])
+        return out
 
     # ─── Module Info ─────────────────────────────────────────
 
@@ -311,32 +263,71 @@ class DBManager:
 
     # ─── Query ───────────────────────────────────────────────
 
+    def _orchestrator(self):
+        """Latest scan's recorded orchestrator (or None)."""
+        mi = self.get_module_info()
+        return mi['orchestrator'] if mi else None
+
     def get_class_by_name(self, class_name):
-        """Get a single class record by name."""
-        return self._query_one(
-            "SELECT * FROM classes WHERE class_name = ?",
-            (class_name,)
-        )
+        """One class record by qualified_name. Returns legacy shape so
+        old callers don't notice the underlying table changed.
+        """
+        row = self._query_one(
+            "SELECT * FROM entities "
+            "WHERE qualified_name = ? AND kind IN ('class','struct','interface')",
+            (class_name,))
+        if not row:
+            return None
+        out = self._class_row_from_entity(row, self._orchestrator())
+        # Fill method/member counts from child entities of this class.
+        kids = self._query_all(
+            "SELECT kind FROM entities WHERE parent_qname = ?",
+            (class_name,))
+        out['method_count'] = sum(1 for k in kids if k['kind'] == 'method')
+        out['member_count'] = sum(1 for k in kids if k['kind'] == 'field')
+        return out
 
     # Alias for backward compatibility (callers use get_task)
     get_task = get_class_by_name
 
     def get_all_tasks(self):
-        """Get all registered classes."""
-        return self._query_all("SELECT * FROM classes ORDER BY id")
+        """All class/struct/interface entities, legacy-shaped, with the
+        same method/member counts the old `classes` table held.
+        """
+        rows = self._query_all(
+            "SELECT * FROM entities "
+            "WHERE kind IN ('class','struct','interface') "
+            "ORDER BY id")
+        if not rows:
+            return []
+        # One query for all child counts; group in Python.
+        kid_rows = self._query_all(
+            "SELECT parent_qname, kind, COUNT(*) AS n FROM entities "
+            "WHERE parent_qname IS NOT NULL "
+            "GROUP BY parent_qname, kind")
+        method_counts = {r['parent_qname']: r['n'] for r in kid_rows if r['kind'] == 'method'}
+        field_counts  = {r['parent_qname']: r['n'] for r in kid_rows if r['kind'] == 'field'}
+        orch = self._orchestrator()
+        out = []
+        for r in rows:
+            d = self._class_row_from_entity(r, orch)
+            d['method_count'] = method_counts.get(r['qualified_name'], 0)
+            d['member_count'] = field_counts.get(r['qualified_name'], 0)
+            out.append(d)
+        return out
 
     def get_stats(self):
-        """Get pipeline statistics."""
+        """total / analyzed / pending counts for the dashboard."""
         return self._query_one("""
             SELECT
-                COUNT(*) as total,
+                (SELECT COUNT(*) FROM entities
+                  WHERE kind IN ('class','struct','interface')) AS total,
                 (SELECT COUNT(DISTINCT class_name)
-                 FROM responsibility_analysis) as analyzed,
-                COUNT(*) - (SELECT COUNT(DISTINCT ra.class_name)
-                            FROM responsibility_analysis ra
-                            INNER JOIN classes c ON ra.class_name = c.class_name
-                           ) as pending
-            FROM classes
+                  FROM responsibility_analysis) AS analyzed,
+                (SELECT COUNT(*) FROM entities
+                  WHERE kind IN ('class','struct','interface'))
+                - (SELECT COUNT(DISTINCT class_name)
+                    FROM responsibility_analysis) AS pending
         """)
 
     # ─── Responsibility Analysis CRUD ────────────────────────
@@ -407,13 +398,13 @@ class DBManager:
         return self._execute("DELETE FROM responsibility_analysis").rowcount
 
     def delete_all_tasks(self):
-        """Delete all scan data (classes + dependencies + module_info)."""
+        """Delete all scan data (graph + module_info)."""
         conn = self._connect()
         try:
             cur = conn.cursor()
-            cur.execute("DELETE FROM dependencies")
+            cur.execute("DELETE FROM relationships")
+            cur.execute("DELETE FROM entities")
             cur.execute("DELETE FROM module_info")
-            cur.execute("DELETE FROM classes")
             conn.commit()
         finally:
             conn.close()
