@@ -11,7 +11,6 @@ from tool.db import DBManager
 from tool.source_io import SourceReader
 from tool.agents import ScannerAgent
 from tool.design_critic import DesignCriticAgent
-from tool.report.v2_data import build_payload
 
 
 DB = "outputs/critic_smoke.db"
@@ -104,24 +103,10 @@ def main():
     assert mod, "no module result saved"
     print(f"  ✓ DB has {len(subs)} subtree analyses + module synthesis")
 
-    # Verify report payload picks them up
-    payload = build_payload(db)
-    critic_payload = payload['critic']
-    assert critic_payload['module'], "module missing from payload"
-    assert critic_payload['subtrees'], "subtrees missing from payload"
-    recs = critic_payload['module']['recommendations']
-    assert len(recs) == 1 and recs[0]['priority'] == 'high'
-    print(f"  ✓ payload includes {len(critic_payload['subtrees'])} subtrees "
-          f"and {len(recs)} recommendations")
+    # Payload assembly (build_payload) is being rebuilt with the new UI.
 
-    # Generate HTML and check it embeds the data
-    from tool.report import generate_html_report
-    out = generate_html_report(db, "outputs/critic_smoke.html")
-    html = out.read_text()
-    assert "痛点" in html
-    assert "设计建议" in html
-    assert "Garage::Workshop" in html
-    print(f"  ✓ HTML report {out} written ({out.stat().st_size:,} bytes)")
+    # HTML report UI was scrapped and is being rebuilt; the data-layer
+    # smoke above is the source of truth for now.
 
     os.remove(DB)
     print("\nDesign critic smoke: PASS")
