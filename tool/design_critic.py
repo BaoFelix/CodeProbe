@@ -204,8 +204,13 @@ class DesignCriticAgent(BaseAgent):
         g = build_graph(entities, relationships)
         h, rep_map = fold_abstractions(g, mode='leaves')
         C, label = condense(h)
+        # Take ALL roots, even isolated ones. For design critique a
+        # class with no outgoing edges still has methods/fields worth
+        # auditing (a god class in a .cxx without cross-file context
+        # presents exactly that way). Sort by reach descending so the
+        # bigger stories come first.
         roots = sorted(
-            [r for r in find_roots(C) if len(nx.descendants(C, r)) > 0],
+            list(find_roots(C)),
             key=lambda r: len(nx.descendants(C, r)),
             reverse=True)
         if not roots:
