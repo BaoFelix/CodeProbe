@@ -412,20 +412,34 @@ def parse_file(file_path):
 
     # ── methods ───────────────────────────────────────────
     # Parent for a method = the nearest enclosing class/struct.
-    # If there's no enclosing class (free function), we skip it for now —
-    # CodeProbe is class-centric.
+    # If there's no enclosing class (free function), we skip it — UNLESS
+    # the declarator name is itself qualified (`void Foo::bar() {…}`,
+    # i.e. an out-of-line method definition). That pattern dominates
+    # .cxx files: classes are declared in .hxx and their methods are
+    # defined here. We split the qualified name to recover parent + short.
     for _idx, caps in QueryCursor(_METHOD_IN_CLASS_QUERY).matches(root):
         decl = caps['decl'][0]
         name_node = caps['name'][0]
-        short_name = name_node.text.decode()
+        raw_name = name_node.text.decode()
         parent_qname = _enclosing_container_qname(
             decl, ('class_specifier', 'struct_specifier'))
         if parent_qname is None:
-            continue  # free function — not a class member, skip for now
-        # The method's qualified_name needs the namespace chain too.
-        # Re-walk including namespaces:
-        full_parent = _enclosing_container_qname(decl, _CONTAINER_TYPES)
-        qualified_name = f'{full_parent}::{short_name}'
+            # Out-of-line definition: name carries Class::method (or
+            # NS::Class::method). Otherwise it's a true free function — skip.
+            if '::' not in raw_name:
+                continue
+            parts = raw_name.split('::')
+            short_name = parts[-1]
+            # Compose parent from any enclosing namespace + the prefix of raw_name.
+            ns_parent = _enclosing_container_qname(decl, ('namespace_definition',))
+            inferred_parent = '::'.join(parts[:-1])
+            full_parent = (f'{ns_parent}::{inferred_parent}'
+                           if ns_parent else inferred_parent)
+            qualified_name = f'{full_parent}::{short_name}'
+        else:
+            short_name = raw_name.split('::')[-1]  # in case of nested ctor
+            full_parent = _enclosing_container_qname(decl, _CONTAINER_TYPES)
+            qualified_name = f'{full_parent}::{short_name}'
         # Signature: the whole declarator text (`Repair(Engine& e)`),
         # plus return type if we can find it. Keep it pragmatic — the
         # raw source slice is the most honest signature we can give.
@@ -870,6 +884,33 @@ def parse_project(root_dir, exclude_vendored=True, cache=None, workers=None):
         all_entities.extend(e)
         all_relationships.extend(r)
         alias_map.update(a)
+
+    # ── phantom classes: out-of-line method definitions reference a
+    # class declared in a .hxx we may not have seen (very common when
+    # someone shares only .cxx files). Materialize placeholder class
+    # entities for those parent_qnames so the rest of the graph can
+    # treat them as first-class participants.
+    known_qnames = {e.qualified_name for e in all_entities}
+    needed = {}
+    for e in all_entities:
+        if e.kind not in ('method', 'field') or not e.parent_qname:
+            continue
+        if e.parent_qname in known_qnames:
+            continue
+        # Don't promote a namespace-only parent — only when it looks
+        # like a class (ends with an identifier that has methods).
+        needed.setdefault(e.parent_qname, e.file_path)
+    for pqname, file_path in needed.items():
+        all_entities.append(Entity(
+            kind='class',
+            name=pqname.split('::')[-1],
+            qualified_name=pqname,
+            parent_qname='::'.join(pqname.split('::')[:-1]) or None,
+            file_path=file_path,
+            start_line=0, end_line=0,
+            attrs={'phantom': True,
+                   'reason': 'declaration not seen, inferred from out-of-line methods'},
+        ))
 
     # ── alias expansion: rewrite relationship targets through aliases ─
     # e.g. target_name 'sink_ptr' → alias chain → 'sink'. If an alias
