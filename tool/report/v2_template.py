@@ -103,6 +103,38 @@ _HTML = r"""<!DOCTYPE html>
                     word-break: break-all; }
 
   /* Pains strip */
+  .critic-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+  .ctab { padding: 3px 10px; font-size: 12px; cursor: pointer;
+          border: 1px solid var(--border); background: white; border-radius: 4px; }
+  .ctab.active { background: var(--accent); color: white; border-color: var(--accent); }
+  .critic-panel { display: none; font-size: 12px; }
+  .critic-panel.active { display: block; }
+  .critic-panel details { margin-bottom: 4px; }
+  .critic-panel summary { cursor: pointer; padding: 3px 0; font-weight: 600; }
+  .critic-panel summary:hover { background: #f1f5f9; }
+  .stage-card { padding: 6px 8px; background: #f0f9ff; border-left: 3px solid var(--accent);
+                margin: 4px 0; border-radius: 2px; }
+  .stage-card .stage-name { font-weight: 600; }
+  .stage-card .stage-meta { color: var(--muted); font-size: 11px; }
+  .component-line { padding: 2px 0 2px 12px; }
+  .pain-card { padding: 6px 8px; background: #fef2f2; border-left: 3px solid var(--orch);
+               margin: 4px 0; border-radius: 2px; }
+  .pain-card .pain-where { color: var(--muted); font-size: 11px; font-family: ui-monospace, monospace; }
+  .pain-card .pain-cat { display: inline-block; padding: 1px 5px; border-radius: 3px;
+                         background: var(--orch); color: white; font-size: 10px; margin-right: 6px; }
+  .rec-card { padding: 8px 10px; background: #fef9c3; border-left: 3px solid #ca8a04;
+              margin: 6px 0; border-radius: 2px; }
+  .rec-card.high { border-left-color: var(--orch); background: #fef2f2; }
+  .rec-card.low  { border-left-color: var(--util);  background: #f8fafc; }
+  .rec-card .rec-priority { font-size: 10px; padding: 1px 6px; border-radius: 3px;
+                            color: white; background: #ca8a04; margin-right: 6px; }
+  .rec-card.high .rec-priority { background: var(--orch); }
+  .rec-card.low  .rec-priority { background: var(--util); }
+  .rec-card .rec-target { font-weight: 600; }
+  .rec-card .rec-impact { color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .empty-msg { color: var(--muted); font-style: italic; padding: 8px; }
+
+  /* Legacy pain strip styles kept for any third-party skill that still uses them. */
   .pains-strip details { margin-bottom: 6px; }
   .pains-strip summary { cursor: pointer; font-size: 13px; font-weight: 600;
                           padding: 4px 0; }
@@ -152,8 +184,14 @@ _HTML = r"""<!DOCTYPE html>
   </aside>
 
   <section class="pains-strip">
-    <div class="section-title">Pain points</div>
-    <div id="pains"></div>
+    <div class="critic-tabs">
+      <button class="ctab active" data-tab="workflow">Ideal workflow</button>
+      <button class="ctab" data-tab="pains">Pain points</button>
+      <button class="ctab" data-tab="recs">Recommendations</button>
+    </div>
+    <div id="critic-workflow" class="critic-panel active"></div>
+    <div id="critic-pains"    class="critic-panel"></div>
+    <div id="critic-recs"     class="critic-panel"></div>
   </section>
 </main>
 
@@ -322,29 +360,141 @@ function escapeHtml(s) {
 }
 
 // ── Bottom: pain points ─────────────────────────────────────
-function renderPains() {
-  const root = document.getElementById('pains');
-  if (DATA.pains.length === 0) {
-    root.innerHTML = '<div style="color: var(--muted); font-size: 12px;">No responsibility analysis yet. Run <code>analyze</code> first.</div>';
+// ── Bottom: DesignCritic ────────────────────────────────────
+function renderCritic() {
+  const critic = DATA.critic || {subtrees: [], module: null};
+  renderCriticWorkflow(critic);
+  renderCriticPains(critic);
+  renderCriticRecs(critic);
+
+  // tab switching
+  document.querySelectorAll('.ctab').forEach(b => {
+    b.onclick = () => {
+      document.querySelectorAll('.ctab').forEach(x => x.classList.remove('active'));
+      document.querySelectorAll('.critic-panel').forEach(p => p.classList.remove('active'));
+      b.classList.add('active');
+      document.getElementById('critic-' + b.dataset.tab).classList.add('active');
+    };
+  });
+}
+
+function renderCriticWorkflow(critic) {
+  const root = document.getElementById('critic-workflow');
+  const mod = critic.module;
+  if (!mod && critic.subtrees.length === 0) {
+    root.innerHTML = '<div class="empty-msg">No design analysis yet. Run <code>analyze</code>.</div>';
     return;
   }
-  for (const group of DATA.pains) {
-    const det = document.createElement('details');
-    const sum = document.createElement('summary');
-    sum.textContent = `${group.sin} (${group.classes.length})`;
-    det.appendChild(sum);
-    for (const c of group.classes) {
-      const div = document.createElement('div');
-      div.className = 'pain-item';
-      div.innerHTML = `<span class="pain-class" data-qname="${c.class}">${c.class}</span>`
-        + (c.actual ? `<br><em>actual:</em> ${escapeHtml(c.actual)}` : '')
-        + (c.ideal ? `<br><em>ideal:</em> ${escapeHtml(c.ideal)}` : '')
-        + (c.violations ? `<br><em>violations:</em> ${escapeHtml(c.violations)}` : '');
-      div.querySelector('.pain-class').onclick = () => focusNode(c.class);
-      det.appendChild(div);
+
+  let html = '';
+  if (mod && mod.module_workflow && mod.module_workflow.length) {
+    html += `<div style="margin-bottom:8px;"><strong>Module workflow</strong></div>`;
+    for (const s of mod.module_workflow) {
+      html += `<div class="stage-card">`;
+      html += `<div class="stage-name">${escapeHtml(s.stage || '?')}</div>`;
+      if (s.description) html += `<div>${escapeHtml(s.description)}</div>`;
+      if (s.source_subtrees && s.source_subtrees.length)
+        html += `<div class="stage-meta">from: ${(s.source_subtrees||[]).join(', ')}</div>`;
+      html += `</div>`;
     }
-    root.appendChild(det);
   }
+  for (const sub of critic.subtrees) {
+    if (!sub.analysis) continue;
+    const a = sub.analysis;
+    const det = `<details><summary>${escapeHtml(sub.root)} — ${escapeHtml(a.essence || '')}</summary>`;
+    let inner = '';
+    for (const stage of (a.pipeline || [])) {
+      inner += `<div class="stage-card">`;
+      inner += `<div class="stage-name">${escapeHtml(stage.name || '?')}`;
+      if (stage.altitude) inner += ` <span class="stage-meta">(${escapeHtml(stage.altitude)})</span>`;
+      inner += `</div>`;
+      if (stage.responsibility) inner += `<div>${escapeHtml(stage.responsibility)}</div>`;
+      // Components in this stage
+      const comps = (a.components || []).filter(c => c.stage === stage.name);
+      for (const c of comps) {
+        inner += `<div class="component-line">• ${escapeHtml(c.name || '?')}`;
+        if (c.role) inner += ` <span class="stage-meta">— ${escapeHtml(c.role)}</span>`;
+        if (c.multiple_impls) inner += ` <span class="stage-meta">[needs interface]</span>`;
+        inner += `</div>`;
+      }
+      inner += `</div>`;
+    }
+    html += det + inner + '</details>';
+  }
+  root.innerHTML = html || '<div class="empty-msg">No workflow data.</div>';
+}
+
+function renderCriticPains(critic) {
+  const root = document.getElementById('critic-pains');
+  let html = '';
+  let total = 0;
+  for (const sub of critic.subtrees) {
+    if (!sub.analysis || !sub.analysis.pains || sub.analysis.pains.length === 0) continue;
+    html += `<details open><summary>${escapeHtml(sub.root)} (${sub.analysis.pains.length})</summary>`;
+    for (const p of sub.analysis.pains) {
+      total++;
+      html += `<div class="pain-card">`;
+      if (p.category) html += `<span class="pain-cat">${escapeHtml(p.category)}</span>`;
+      html += `${escapeHtml(p.what || '')}`;
+      if (p.where) html += `<div class="pain-where">${escapeHtml(p.where)}</div>`;
+      html += `</div>`;
+    }
+    html += `</details>`;
+  }
+  root.innerHTML = total ? html : '<div class="empty-msg">No pain points reported.</div>';
+}
+
+function renderCriticRecs(critic) {
+  const root = document.getElementById('critic-recs');
+  const mod = critic.module;
+  if (!mod || !mod.recommendations || mod.recommendations.length === 0) {
+    // Also try to surface cross_observations as recs if no recs present.
+    if (mod && mod.cross_observations && mod.cross_observations.length) {
+      let html = '<div style="margin-bottom:8px;"><strong>Cross-subtree observations</strong></div>';
+      for (const o of mod.cross_observations) {
+        html += `<div class="rec-card"><div class="rec-target">${escapeHtml(o.pattern || '')}</div>`;
+        if (o.suggestion) html += `<div class="rec-impact">${escapeHtml(o.suggestion)}</div>`;
+        html += `</div>`;
+      }
+      root.innerHTML = html;
+      return;
+    }
+    root.innerHTML = '<div class="empty-msg">No recommendations.</div>';
+    return;
+  }
+  // Sort: high → medium → low
+  const order = {high:0, medium:1, low:2};
+  const recs = [...mod.recommendations].sort((a,b) =>
+    (order[a.priority]||3) - (order[b.priority]||3));
+  let html = '';
+  for (const r of recs) {
+    const pri = r.priority || 'medium';
+    html += `<div class="rec-card ${pri}">`;
+    html += `<span class="rec-priority">${pri}</span>`;
+    html += `<span class="rec-target">${escapeHtml(r.target || '?')}</span>`;
+    if (r.action) html += `<div>${escapeHtml(r.action)}</div>`;
+    if (r.expected_impact) html += `<div class="rec-impact">${escapeHtml(r.expected_impact)}</div>`;
+    if (r.evidence) html += `<div class="rec-impact" style="font-family:ui-monospace,monospace;">${escapeHtml(r.evidence)}</div>`;
+    html += `</div>`;
+  }
+  // Append cross_observations + missing_abstractions at the end
+  if (mod.cross_observations && mod.cross_observations.length) {
+    html += `<div style="margin:12px 0 4px;"><strong>Cross-subtree observations</strong></div>`;
+    for (const o of mod.cross_observations) {
+      html += `<div class="rec-card"><div class="rec-target">${escapeHtml(o.pattern || '')}</div>`;
+      if (o.suggestion) html += `<div class="rec-impact">${escapeHtml(o.suggestion)}</div>`;
+      html += `</div>`;
+    }
+  }
+  if (mod.missing_abstractions && mod.missing_abstractions.length) {
+    html += `<div style="margin:12px 0 4px;"><strong>Missing abstractions</strong></div>`;
+    for (const m of mod.missing_abstractions) {
+      html += `<div class="rec-card"><div class="rec-target">${escapeHtml(m.role || '?')} → ${escapeHtml(m.suggested_interface || '?')}</div>`;
+      if (m.current_implementations) html += `<div class="rec-impact">current: ${(m.current_implementations||[]).join(', ')}</div>`;
+      html += `</div>`;
+    }
+  }
+  root.innerHTML = html;
 }
 
 // ── Depth control: hide nodes deeper than k in the dom-forest ─
@@ -402,7 +552,7 @@ document.getElementById('search').oninput = (e) => {
 // ── Boot ─────────────────────────────────────────────────────
 renderForest();
 renderUtilities();
-renderPains();
+renderCritic();
 </script>
 </body>
 </html>

@@ -21,6 +21,7 @@ from .source_io import SourceReader
 from .prompts import PromptBuilder
 from .llm import LLMClient
 from .agents import ScannerAgent, ResponsibilityAgent, DesignAgent
+from .design_critic import DesignCriticAgent
 
 
 class Pipeline:
@@ -55,6 +56,10 @@ class Pipeline:
             reader=self.reader, prompts=self.prompts
         )
         self.design_agent = DesignAgent(
+            llm=self.llm, db=self.db,
+            reader=self.reader, prompts=self.prompts
+        )
+        self.critic = DesignCriticAgent(
             llm=self.llm, db=self.db,
             reader=self.reader, prompts=self.prompts
         )
@@ -253,12 +258,15 @@ class Pipeline:
                 print("  Error: No classes found after scanning.")
                 return False
 
-        # === Step 2: Per-class Responsibility Analysis ===
+        # === Step 2: Holistic design analysis (default) ===
+        # ResponsibilityAgent (Seven Sins) is no longer default — it
+        # ships as an optional skill. DesignCritic does a two-pass
+        # top-down audit instead.
         print(f"\n{'='*60}")
-        print(f"  Step 2/3: Per-class responsibility analysis...")
+        print(f"  Step 2/3: Holistic design analysis...")
         print(f"{'='*60}")
 
-        if not self._resp_analyze_all():
+        if not self.critic.run():
             return False
 
         # === Step 3: Design Proposal ===

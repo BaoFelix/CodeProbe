@@ -180,6 +180,27 @@ class DBManager:
                     cached_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (prompt_hash, model)
                 );
+
+                /* ── design_critic_subtree: per-subtree analysis raw
+                   + parsed JSON. One row per subtree per scan. */
+                CREATE TABLE IF NOT EXISTS design_critic_subtree (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subtree_root    TEXT NOT NULL,
+                    prompt          TEXT,
+                    raw_response    TEXT,
+                    parsed_json     TEXT,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                /* ── design_critic_module: synthesis pass output. */
+                CREATE TABLE IF NOT EXISTS design_critic_module (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    module_name     TEXT NOT NULL,
+                    prompt          TEXT,
+                    raw_response    TEXT,
+                    parsed_json     TEXT,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
             """)
             conn.commit()
         finally:
@@ -488,3 +509,46 @@ class DBManager:
     def llm_cache_clear(self):
         """Wipe the LLM response cache."""
         self._execute("DELETE FROM llm_cache")
+
+    # ─── DesignCritic outputs ───────────────────────────────
+
+    def save_design_subtree(self, subtree_root, prompt, raw_response,
+                            parsed):
+        import json as _json
+        self._execute("""
+            INSERT INTO design_critic_subtree
+                (subtree_root, prompt, raw_response, parsed_json)
+            VALUES (?, ?, ?, ?)
+        """, (subtree_root, prompt, raw_response,
+              _json.dumps(parsed) if parsed else None))
+
+    def save_design_module(self, module_name, prompt, raw_response, parsed):
+        import json as _json
+        self._execute("""
+            INSERT INTO design_critic_module
+                (module_name, prompt, raw_response, parsed_json)
+            VALUES (?, ?, ?, ?)
+        """, (module_name, prompt, raw_response,
+              _json.dumps(parsed) if parsed else None))
+
+    def get_design_subtrees(self):
+        """Latest analysis per subtree_root."""
+        return self._query_all("""
+            SELECT s.* FROM design_critic_subtree s
+            INNER JOIN (
+                SELECT subtree_root, MAX(id) AS max_id
+                FROM design_critic_subtree GROUP BY subtree_root
+            ) latest
+            ON s.id = latest.max_id
+            ORDER BY s.subtree_root
+        """)
+
+    def get_design_module(self, module_name='default'):
+        return self._query_one(
+            "SELECT * FROM design_critic_module "
+            "WHERE module_name = ? ORDER BY id DESC LIMIT 1",
+            (module_name,))
+
+    def delete_design_critic(self):
+        self._execute("DELETE FROM design_critic_subtree")
+        self._execute("DELETE FROM design_critic_module")

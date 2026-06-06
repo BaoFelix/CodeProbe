@@ -123,8 +123,12 @@ def build_payload(db):
         'style_note': style_note,
     }
 
-    # ── Pain points (Seven Sins) from responsibility_analysis ─────
+    # ── Pain points (Seven Sins) — only used when the user re-enables
+    #    that flow via a skill; otherwise empty. ───────────────────
     pains = _gather_pains(db.get_all_responsibilities() or [])
+
+    # ── DesignCritic output (default). ────────────────────────────
+    critic = _gather_critic(db)
 
     return {
         'summary': summary,
@@ -135,7 +139,24 @@ def build_payload(db):
             {'qname': u, 'short': u.split('::')[-1],
              'in_deg': g.in_degree(u)} for u in utilities],
         'pains': pains,
+        'critic': critic,
     }
+
+
+def _gather_critic(db):
+    """Pull DesignCritic results from the DB and reshape for the UI."""
+    import json as _json
+    subtrees = []
+    for row in db.get_design_subtrees() or []:
+        parsed = _json.loads(row['parsed_json']) if row['parsed_json'] else None
+        subtrees.append({'root': row['subtree_root'], 'analysis': parsed})
+
+    module_row = db.get_design_module('default')
+    module = None
+    if module_row and module_row['parsed_json']:
+        module = _json.loads(module_row['parsed_json'])
+
+    return {'subtrees': subtrees, 'module': module}
 
 
 # ── Helpers ──────────────────────────────────────────────────────
