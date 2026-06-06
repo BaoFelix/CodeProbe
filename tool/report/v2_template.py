@@ -185,12 +185,10 @@ _HTML = r"""<!DOCTYPE html>
 
   <section class="pains-strip">
     <div class="critic-tabs">
-      <button class="ctab active" data-tab="workflow">Ideal workflow</button>
-      <button class="ctab" data-tab="pains">Pain points</button>
+      <button class="ctab active" data-tab="pains">Pain points</button>
       <button class="ctab" data-tab="recs">Recommendations</button>
     </div>
-    <div id="critic-workflow" class="critic-panel active"></div>
-    <div id="critic-pains"    class="critic-panel"></div>
+    <div id="critic-pains"    class="critic-panel active"></div>
     <div id="critic-recs"     class="critic-panel"></div>
   </section>
 </main>
@@ -363,7 +361,6 @@ function escapeHtml(s) {
 // ── Bottom: DesignCritic ────────────────────────────────────
 function renderCritic() {
   const critic = DATA.critic || {subtrees: [], module: null};
-  renderCriticWorkflow(critic);
   renderCriticPains(critic);
   renderCriticRecs(critic);
 
@@ -376,52 +373,6 @@ function renderCritic() {
       document.getElementById('critic-' + b.dataset.tab).classList.add('active');
     };
   });
-}
-
-function renderCriticWorkflow(critic) {
-  const root = document.getElementById('critic-workflow');
-  const mod = critic.module;
-  if (!mod && critic.subtrees.length === 0) {
-    root.innerHTML = '<div class="empty-msg">No design analysis yet. Run <code>analyze</code>.</div>';
-    return;
-  }
-
-  let html = '';
-  if (mod && mod.module_workflow && mod.module_workflow.length) {
-    html += `<div style="margin-bottom:8px;"><strong>Module workflow</strong></div>`;
-    for (const s of mod.module_workflow) {
-      html += `<div class="stage-card">`;
-      html += `<div class="stage-name">${escapeHtml(s.stage || '?')}</div>`;
-      if (s.description) html += `<div>${escapeHtml(s.description)}</div>`;
-      if (s.source_subtrees && s.source_subtrees.length)
-        html += `<div class="stage-meta">from: ${(s.source_subtrees||[]).join(', ')}</div>`;
-      html += `</div>`;
-    }
-  }
-  for (const sub of critic.subtrees) {
-    if (!sub.analysis) continue;
-    const a = sub.analysis;
-    const det = `<details><summary>${escapeHtml(sub.root)} — ${escapeHtml(a.essence || '')}</summary>`;
-    let inner = '';
-    for (const stage of (a.pipeline || [])) {
-      inner += `<div class="stage-card">`;
-      inner += `<div class="stage-name">${escapeHtml(stage.name || '?')}`;
-      if (stage.altitude) inner += ` <span class="stage-meta">(${escapeHtml(stage.altitude)})</span>`;
-      inner += `</div>`;
-      if (stage.responsibility) inner += `<div>${escapeHtml(stage.responsibility)}</div>`;
-      // Components in this stage
-      const comps = (a.components || []).filter(c => c.stage === stage.name);
-      for (const c of comps) {
-        inner += `<div class="component-line">• ${escapeHtml(c.name || '?')}`;
-        if (c.role) inner += ` <span class="stage-meta">— ${escapeHtml(c.role)}</span>`;
-        if (c.multiple_impls) inner += ` <span class="stage-meta">[needs interface]</span>`;
-        inner += `</div>`;
-      }
-      inner += `</div>`;
-    }
-    html += det + inner + '</details>';
-  }
-  root.innerHTML = html || '<div class="empty-msg">No workflow data.</div>';
 }
 
 function renderCriticPains(critic) {
