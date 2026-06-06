@@ -118,8 +118,8 @@ def main():
     from tool.report import generate_html_report
     out = generate_html_report(db, "outputs/critic_smoke.html")
     html = out.read_text()
-    assert "Pain points" in html
-    assert "critic-recs" in html
+    assert "痛点" in html
+    assert "设计建议" in html
     assert "Garage::Workshop" in html
     print(f"  ✓ HTML report {out} written ({out.stat().st_size:,} bytes)")
 
