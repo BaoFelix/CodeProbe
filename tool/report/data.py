@@ -12,7 +12,7 @@ import networkx as nx
 
 from ..workflow import (
     build_graph, fold_abstractions, condense, find_roots,
-    dominator_children, score_nodes, classify_utility,
+    dominator_children, classify_utility,
 )
 from ..model import Entity, Relationship
 
@@ -27,13 +27,11 @@ def build_payload(db):
     roots = sorted(find_roots(C),
                    key=lambda r: len(nx.descendants(C, r)), reverse=True)
 
-    scores = score_nodes(g)
     orchestrator = (db.get_module_info() or {})
     orch_name = _get(orchestrator, 'orchestrator')
     utilities = {n for n in g.nodes if classify_utility(g, n)}
 
-    arch = _build_arch(C, label, roots, orch_name, utilities)
-    rel = _build_rel(g, db, roots, label, C, orch_name, utilities)
+    graph = _build_graph_payload(g, db, roots, label, C, orch_name, utilities)
     review = _build_review(db)
 
     summary = {
@@ -41,74 +39,11 @@ def build_payload(db):
         'class_count': _get(orchestrator, 'class_count'),
         'file_count': _get(orchestrator, 'file_count'),
         'orchestrator': orch_name,
-        'style': _detect_style_tag(db),
     }
-    return {'summary': summary, 'arch': arch, 'rel': rel, 'review': review}
+    return {'summary': summary, 'graph': graph, 'review': review}
 
 
-# ── Section 1: dominator forest ─────────────────────────────────
-
-def _build_arch(C, label, roots, orch_name, utilities):
-    """Flatten the dominator forest into nodes + parent->child edges.
-    The front-end starts with only roots visible and expands level by
-    level. `depth` lets the UI know the initial expand state.
-    """
-    nodes, edges = [], []
-    seen = set()
-
-    # Only roots that actually head a tree (have ≥1 descendant) are
-    # "workflow". Isolated single-node roots are not architecture —
-    # they still appear in the relationship graph (section 2).
-    workflow_roots = [r for r in roots if len(_children(C, r)) > 0]
-
-    def visit(cid, parent_label, depth):
-        lbl = label[cid]
-        if lbl in seen:
-            return
-        seen.add(lbl)
-        children = _children(C, cid)
-        nodes.append({
-            'id': lbl,
-            'label': lbl.split('::')[-1],
-            'qname': lbl,
-            'depth': depth,
-            'is_root': parent_label is None,
-            'has_children': len(children) > 0,
-            'is_orch': 1 if lbl == orch_name else 0,
-            'is_util': 1 if lbl in utilities else 0,
-        })
-        if parent_label is not None:
-            edges.append({'source': parent_label, 'target': lbl})
-        for ch in children:
-            visit(ch, lbl, depth + 1)
-
-    for root in workflow_roots:
-        visit(root, None, 0)
-
-    return {'nodes': nodes, 'edges': edges}
-
-
-def _children(C, cid):
-    """Direct dominator-tree children of a condensed node, within its
-    own root's tree."""
-    root = _root_of(C, cid)
-    return dominator_children(C, root).get(cid, [])
-
-
-def _root_of(C, cid):
-    """Find the forest root that this condensed node belongs to (walk
-    up predecessors until in-degree 0)."""
-    cur = cid
-    guard = 0
-    while C.in_degree(cur) > 0 and guard < 10000:
-        cur = next(iter(C.predecessors(cur)))
-        guard += 1
-    return cur
-
-
-# ── Section 2: relationship graph ───────────────────────────────
-
-_LEVEL = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
+# ── Graph payload (shared by 架构分析 + 详细关系, UML rendering) ──
 
 # Container / smart-pointer wrappers and config-enum families that are
 # noise as graph nodes — they're not collaborator classes.
@@ -116,12 +51,18 @@ _WRAPPERS = {'vector', 'list', 'map', 'set', 'unordered_map', 'unordered_set',
              'array', 'deque', 'SharedPtr', 'shared_ptr', 'unique_ptr',
              'weak_ptr', 'ScopedSMArray', 'ScopedSMString', 'pair', 'tuple'}
 
+# Strongest-first, so a multi-edge picks its UML notation from the
+# strongest structural relationship present.
+_KIND_RANK = ['inherits', 'implements', 'composes', 'aggregates',
+              'associates', 'depends']
+_LEVEL_OF = {'depends': 0, 'associates': 1, 'implements': 2,
+             'aggregates': 3, 'composes': 4, 'inherits': 5}
+# Which kinds count as "structural" (shown in 架构分析).
+_STRUCTURAL = {'inherits', 'implements', 'composes', 'aggregates'}
+
 
 def _is_noise_external(name):
-    """An unresolved target_name that isn't worth showing as a node:
-    config enums (JA_*, ALL_CAPS), C typedefs (_t / _type), template
-    fragments (contain < > * , space), and container/smart-ptr wrappers.
-    """
+    """An unresolved target_name not worth showing as a node."""
     if not name:
         return True
     if any(ch in name for ch in '<>*, '):
@@ -139,28 +80,43 @@ def _is_noise_external(name):
     return False
 
 
-def _build_rel(g, db, roots, label, C, orch_name, utilities):
-    """Internal class nodes + external domain-type nodes + collapsed
-    multi-edges. The graph shows both who-uses-whom internally AND each
-    class's external coupling surface — essential when scanning partial
-    source where most targets live in headers not in scope.
+def _children(C, cid):
+    root = _root_of(C, cid)
+    return dominator_children(C, root).get(cid, [])
+
+
+def _root_of(C, cid):
+    cur, guard = cid, 0
+    while C.in_degree(cur) > 0 and guard < 10000:
+        cur = next(iter(C.predecessors(cur)))
+        guard += 1
+    return cur
+
+
+def _build_graph_payload(g, db, roots, label, C, orch_name, utilities):
+    """One UML class-diagram dataset shared by both graph sections.
+
+    nodes  — internal classes + external domain types (dashed boxes).
+    edges  — one per (src,tgt) pair, carrying:
+               primary   : the strongest relationship kind (UML notation)
+               kinds     : every kind between the pair (edge label)
+               level     : max coupling level (edge color)
+               structural: bool — shown in 架构分析
+               evidence  : per-kind source lines
+    roots  — initial-visible set (adaptive to project size).
     """
-    nodes = []
     internal = set(g.nodes)
+    nodes = []
     for n in g.nodes:
+        e = _entity_kind(db, n)
         nodes.append({
-            'id': n,
-            'label': n.split('::')[-1],
-            'qname': n,
-            'kind': g.nodes[n].get('kind', 'class'),
+            'id': n, 'label': n.split('::')[-1], 'qname': n,
+            'kind': e,
             'is_orch': 1 if n == orch_name else 0,
             'is_util': 1 if n in utilities else 0,
             'is_external': 0,
-            'out_deg': g.out_degree(n),
         })
 
-    # Collapse multi-edges to one per (src, tgt). Targets may be internal
-    # (target_qname set) or external domain types (target_name kept).
     from collections import defaultdict
     pair = defaultdict(list)
     ext_seen = set()
@@ -174,8 +130,10 @@ def _build_rel(g, db, roots, label, C, orch_name, utilities):
             name = r['target_name']
             if _is_noise_external(name):
                 continue
-            tgt = '(ext) ' + name          # synthetic id, distinct namespace
+            tgt = '(ext) ' + name
             ext_seen.add(name)
+        if src == tgt:
+            continue
         pair[(src, tgt)].append({
             'kind': r['kind'], 'level': r['level'],
             'evidence_file': r['evidence_file'],
@@ -183,32 +141,25 @@ def _build_rel(g, db, roots, label, C, orch_name, utilities):
             'evidence_text': r['evidence_text'],
         })
 
-    # Add external nodes.
     for name in sorted(ext_seen):
         nodes.append({
-            'id': '(ext) ' + name,
-            'label': name,
-            'qname': name,
-            'kind': 'external',
-            'is_orch': 0, 'is_util': 0, 'is_external': 1,
-            'out_deg': 0,
+            'id': '(ext) ' + name, 'label': name, 'qname': name,
+            'kind': 'external', 'is_orch': 0, 'is_util': 0, 'is_external': 1,
         })
 
     edges = []
     for (s, t), evs in pair.items():
+        kinds = {e['kind'] for e in evs}
+        primary = next((k for k in _KIND_RANK if k in kinds), 'depends')
         edges.append({
             'id': f'{s}__{t}', 'source': s, 'target': t,
-            'level': max(e['level'] for e in evs),
-            'kinds': sorted({e['kind'] for e in evs}),
+            'primary': primary,
+            'kinds': sorted(kinds, key=lambda k: -_LEVEL_OF.get(k, 0)),
+            'level': max(_LEVEL_OF.get(k, 0) for k in kinds),
+            'structural': 1 if (kinds & _STRUCTURAL) else 0,
             'evidence': evs,
         })
 
-    # Initial visible set, adaptive to project size:
-    #   small project (<=25 internal classes) → show them all, so a
-    #     partial-source scan isn't hiding most of its own classes.
-    #   large project → show only the forest roots that head a real
-    #     tree (have children), so the opening view stays readable.
-    # Expanding any node reveals its neighbors (internal + external).
     def rep(cid):
         for m in C.nodes[cid].get('members', {label[cid]}):
             if m in internal:
@@ -222,6 +173,12 @@ def _build_rel(g, db, roots, label, C, orch_name, utilities):
                                    if len(_children(C, r)) > 0) if q]
 
     return {'nodes': nodes, 'edges': edges, 'roots': root_qnames}
+
+
+def _entity_kind(db, qname):
+    row = db.get_entity(qname)
+    return row['kind'] if row else 'class'
+
 
 
 # ── Section 3: design review ────────────────────────────────────
@@ -301,12 +258,6 @@ def _kv(pairs):
 def _sort_by_priority(recs):
     order = {'high': 0, 'medium': 1, 'low': 2}
     return sorted(recs, key=lambda r: order.get(r.get('priority'), 3))
-
-
-def _detect_style_tag(db):
-    # The style was computed at scan time but not persisted; recompute
-    # cheaply would need the graph. Leave blank — not essential here.
-    return ''
 
 
 def _get(row, col):
