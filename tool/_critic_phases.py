@@ -76,7 +76,9 @@ Respond with a single JSON object on one line, fields:
   components: list of {{stage, name, role, multiple_impls}} —
               the ideal decomposition. `multiple_impls` is true ONLY when
               the input data shows ≥2 concrete implementations of this role.
-  pains: list of {{what, where, category}} — pain points found.
+  pains: list of {{title, what, where, category}} — pain points found.
+         `title` is a SHORT (<=8 words) summary headline of the problem.
+         `what` is the full explanation.
          `category` ∈ {{mixed-altitude, naming-mismatch, missing-component,
                        duplication, ownership-unclear, other}}.
   mappings: list of {{current, ideal_component, fit, reason}} —
@@ -134,8 +136,9 @@ Respond with a single JSON object on one line, fields:
   cross_observations: list of {{pattern, affected_subtrees, suggestion}}
   missing_abstractions: list of {{role, current_implementations,
                                   suggested_interface}}
-  recommendations: list of {{priority, target, action, expected_impact,
-                             evidence}}
+  recommendations: list of {{title, priority, target, action,
+                             expected_impact, evidence}}
+                   `title` is a SHORT (<=8 words) summary headline.
                    priority ∈ {{high, medium, low}}.
 
 Output ONLY the JSON, no commentary.
