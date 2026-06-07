@@ -110,12 +110,43 @@ def _root_of(C, cid):
 
 _LEVEL = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
 
+# Container / smart-pointer wrappers and config-enum families that are
+# noise as graph nodes — they're not collaborator classes.
+_WRAPPERS = {'vector', 'list', 'map', 'set', 'unordered_map', 'unordered_set',
+             'array', 'deque', 'SharedPtr', 'shared_ptr', 'unique_ptr',
+             'weak_ptr', 'ScopedSMArray', 'ScopedSMString', 'pair', 'tuple'}
+
+
+def _is_noise_external(name):
+    """An unresolved target_name that isn't worth showing as a node:
+    config enums (JA_*, ALL_CAPS), C typedefs (_t / _type), template
+    fragments (contain < > * , space), and container/smart-ptr wrappers.
+    """
+    if not name:
+        return True
+    if any(ch in name for ch in '<>*, '):
+        return True
+    if name.startswith(('JA_', 'SFRES_', 'SPP', 'SM_')):
+        return True
+    if name.endswith(('_t', '_type')):
+        return True
+    if name.isupper():
+        return True
+    if name in _WRAPPERS:
+        return True
+    if name in ('tag_t', 'logical', 'Vint', 'Vfloat', 'Vdouble'):
+        return True
+    return False
+
 
 def _build_rel(g, db, roots, label, C, orch_name, utilities):
-    """All class nodes + collapsed multi-edges. The initial visible set
-    is the forest roots; the UI reveals neighbors on expand.
+    """Internal class nodes + external domain-type nodes + collapsed
+    multi-edges. The graph shows both who-uses-whom internally AND each
+    class's external coupling surface — essential when scanning partial
+    source where most targets live in headers not in scope.
     """
     nodes = []
+    internal = set(g.nodes)
     for n in g.nodes:
         nodes.append({
             'id': n,
@@ -124,21 +155,45 @@ def _build_rel(g, db, roots, label, C, orch_name, utilities):
             'kind': g.nodes[n].get('kind', 'class'),
             'is_orch': 1 if n == orch_name else 0,
             'is_util': 1 if n in utilities else 0,
+            'is_external': 0,
             'out_deg': g.out_degree(n),
         })
 
-    # Collapse multi-edges to one per (src,tgt), recording all evidence.
+    # Collapse multi-edges to one per (src, tgt). Targets may be internal
+    # (target_qname set) or external domain types (target_name kept).
     from collections import defaultdict
     pair = defaultdict(list)
+    ext_seen = set()
     for r in db.get_relationships():
-        if not r['target_qname']:
+        src = r['source_qname']
+        if src not in internal:
             continue
-        pair[(r['source_qname'], r['target_qname'])].append({
+        if r['target_qname']:
+            tgt = r['target_qname']
+        else:
+            name = r['target_name']
+            if _is_noise_external(name):
+                continue
+            tgt = '(ext) ' + name          # synthetic id, distinct namespace
+            ext_seen.add(name)
+        pair[(src, tgt)].append({
             'kind': r['kind'], 'level': r['level'],
             'evidence_file': r['evidence_file'],
             'evidence_line': r['evidence_line'],
             'evidence_text': r['evidence_text'],
         })
+
+    # Add external nodes.
+    for name in sorted(ext_seen):
+        nodes.append({
+            'id': '(ext) ' + name,
+            'label': name,
+            'qname': name,
+            'kind': 'external',
+            'is_orch': 0, 'is_util': 0, 'is_external': 1,
+            'out_deg': 0,
+        })
+
     edges = []
     for (s, t), evs in pair.items():
         edges.append({
@@ -148,17 +203,23 @@ def _build_rel(g, db, roots, label, C, orch_name, utilities):
             'evidence': evs,
         })
 
-    # Initial visible = forest roots (top-level boxes).
-    root_qnames = []
-    for cid in roots:
-        members = C.nodes[cid].get('members', {label[cid]})
-        # pick a representative concrete qname that is an actual node
-        for m in members:
-            if m in g.nodes:
-                root_qnames.append(m)
-                break
-        else:
-            root_qnames.append(label[cid])
+    # Initial visible set, adaptive to project size:
+    #   small project (<=25 internal classes) → show them all, so a
+    #     partial-source scan isn't hiding most of its own classes.
+    #   large project → show only the forest roots that head a real
+    #     tree (have children), so the opening view stays readable.
+    # Expanding any node reveals its neighbors (internal + external).
+    def rep(cid):
+        for m in C.nodes[cid].get('members', {label[cid]}):
+            if m in internal:
+                return m
+        return label[cid] if label[cid] in internal else None
+
+    if len(internal) <= 25:
+        root_qnames = list(internal)
+    else:
+        root_qnames = [q for q in (rep(r) for r in roots
+                                   if len(_children(C, r)) > 0) if q]
 
     return {'nodes': nodes, 'edges': edges, 'roots': root_qnames}
 

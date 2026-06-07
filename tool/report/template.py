@@ -125,6 +125,9 @@ function nodeStyle(){
     {selector:'node[is_util = 1]',style:{'background-color':'#94a3b8'}},
     {selector:'node[kind = "interface"]',style:{'shape':'diamond'}},
     {selector:'node[kind = "struct"]',style:{'background-color':'#0d9488'}},
+    {selector:'node[is_external = 1]',style:{
+      'background-color':'#fff','color':'#64748b',
+      'border-width':1.5,'border-color':'#cbd5e1','border-style':'dashed'}},
     {selector:'edge',style:{
       'curve-style':'bezier','target-arrow-shape':'triangle',
       'width':2,'line-color':'#bbb','target-arrow-color':'#bbb','opacity':0.8}},
