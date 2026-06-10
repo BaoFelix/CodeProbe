@@ -134,6 +134,14 @@ if (DATA.summary.style && DATA.summary.style !== 'oop') {
        'Orchestrator ranking may not reflect the true architectural cores.');
 }
 
+
+function clampZoom(cy){
+  // Keep the initial view comfortable: tiny graphs shouldn't blow up
+  // to billboard-sized boxes, huge graphs shouldn't shrink to dust.
+  if(cy.zoom() > 1.3){ cy.zoom(1.3); cy.center(); }
+  if(cy.zoom() < 0.25){ cy.zoom(0.25); cy.center(); }
+}
+
 const STEREO = {interface:'«interface»', external:'«external»', struct:'«struct»'};
 
 function umlStyle(){
@@ -150,8 +158,6 @@ function umlStyle(){
     {selector:'node[kind = "struct"]',style:{'background-color':'#ecfdf5','border-color':'#0d9488'}},
     {selector:'node[is_external = 1]',style:{
       'background-color':'#fff','color':'#64748b','border-color':'#cbd5e1','border-style':'dashed'}},
-    {selector:'node[is_phantom = 1]',style:{
-      'background-color':'#fafaf9','color':'#78716c','border-color':'#a8a29e','border-style':'dashed'}},
 
     /* UML edge notations */
     {selector:'edge',style:{
@@ -180,7 +186,7 @@ function umlStyle(){
 }
 
 function disp(n, prefix){
-  const st = n.is_phantom ? '«phantom»' : STEREO[n.kind];
+  const st = STEREO[n.kind];
   return (st ? st+'\n' : '') + prefix + n.label;
 }
 
@@ -247,6 +253,7 @@ function makeGraph(containerId, edgePred, dir){
     });
     cy.layout({name:'dagre',rankDir:dir,nodeSep:30,rankSep:60,
                fit:true,padding:24,animate:false}).run();
+    clampZoom(cy);
   }
   cy.on('tap','node',evt=>{
     const id=evt.target.id();
@@ -278,7 +285,7 @@ function makeGraph(containerId, edgePred, dir){
   const collapsed = new Set(A.nodes.filter(n=>hasChild(n.id)).map(n=>n.id));
 
   function archDisp(n, pfx){
-    let txt = (n.is_phantom ? '«phantom»\n' : '') + pfx + n.label;
+    let txt = pfx + n.label;
     if(n.impls && n.impls.length) txt += '\n(+' + n.impls.length + ' impls)';
     return txt;
   }
@@ -326,6 +333,7 @@ function makeGraph(containerId, edgePred, dir){
     });
     cy.layout({name:'dagre',rankDir:'TB',nodeSep:26,rankSep:56,
                fit:true,padding:24,animate:false}).run();
+    clampZoom(cy);
   }
   function collapseSubtree(id){
     collapsed.add(id);
@@ -341,7 +349,7 @@ function makeGraph(containerId, edgePred, dir){
 })();
 
 /* Section 2: all relations, UML */
-makeGraph('cy-rel', e=>true, 'LR');
+makeGraph('cy-rel', e=>true, 'TB');
 
 /* Section 3: design review */
 (function(){

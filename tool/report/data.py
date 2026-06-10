@@ -93,7 +93,7 @@ def _build_arch(g, rep_map, C, label, roots, orch_name, utilities, phantoms):
 
     def visit(cid, parent_lbl, depth):
         lbl = label[cid]
-        if lbl in seen:
+        if lbl in seen or lbl in phantoms:
             return
         seen.add(lbl)
         kids = _children(C, cid)
@@ -105,7 +105,6 @@ def _build_arch(g, rep_map, C, label, roots, orch_name, utilities, phantoms):
             'impls': impls,
             'is_orch': 1 if lbl == orch_name else 0,
             'is_util': 1 if lbl in utilities else 0,
-            'is_phantom': 1 if lbl in phantoms else 0,
         })
         if parent_lbl is not None:
             k = kind_between(parent_lbl, lbl)
@@ -183,9 +182,12 @@ def _build_graph_payload(g, db, roots, label, C, orch_name, utilities, phantoms)
                evidence  : per-kind source lines
     roots  — initial-visible set (adaptive to project size).
     """
-    internal = set(g.nodes)
+    # Phantom classes (declaration never seen — inferred from .cxx
+    # out-of-line methods) are NOT shown: only classes whose full
+    # definition is in scope are what the user is analyzing.
+    internal = set(g.nodes) - phantoms
     nodes = []
-    for n in g.nodes:
+    for n in internal:
         kind, _ = _entity_kind_phantom(db, n)
         nodes.append({
             'id': n, 'label': n.split('::')[-1], 'qname': n,
@@ -193,7 +195,6 @@ def _build_graph_payload(g, db, roots, label, C, orch_name, utilities, phantoms)
             'is_orch': 1 if n == orch_name else 0,
             'is_util': 1 if n in utilities else 0,
             'is_external': 0,
-            'is_phantom': 1 if n in phantoms else 0,
         })
 
     from collections import defaultdict
