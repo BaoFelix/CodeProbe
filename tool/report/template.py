@@ -84,10 +84,11 @@ _HTML = r"""<!DOCTYPE html>
 </header>
 
 <section>
-  <h2>1. 架构分析 <span class="hint">结构关系(继承 / 实现 / 组合 / 聚合)· 点节点展开下一层</span></h2>
+  <h2>1. 架构分析 <span class="hint">工作流层级(支配树)· 点 [+] 节点展开下一层,再点收起</span></h2>
   <div class="legend">
+    <span><b>◆</b> 组合</span><span><b>◇</b> 聚合</span><span><b>→</b> 关联</span>
     <span><b>△</b> 继承</span><span><b>┄△</b> 实现</span>
-    <span><b>◆</b> 组合</span><span><b>◇</b> 聚合</span>
+    <span style="color:#cbd5e1"><b>·····</b> 管辖(无直接依赖)</span>
     <span style="color:var(--orch)"><b>■</b> orchestrator</span>
   </div>
   <div class="graph" id="cy-arch"></div>
@@ -243,9 +244,88 @@ function makeGraph(containerId, edgePred, dir){
   apply();
 }
 
-/* Section 1: structural relations only */
-makeGraph('cy-arch', e=>e.structural===1, 'TB');
-/* Section 2: all relations */
+/* ── Section 1: dominator-forest workflow tree ──────────────
+   Edges are parent→child in the responsibility hierarchy. When a
+   real dependency backs the edge we draw its UML notation; pure
+   dominance (no direct edge) is a dotted grey line. */
+(function(){
+  const A = DATA.arch;
+  if(!A || A.nodes.length===0){
+    document.getElementById('cy-arch').innerHTML =
+      '<div class="empty">没有检测到工作流层级(类之间无内部依赖)。</div>';
+    return;
+  }
+  const childrenOf = {};
+  A.nodes.forEach(n=>childrenOf[n.id]=[]);
+  A.edges.forEach(e=>{ (childrenOf[e.source]=childrenOf[e.source]||[]).push(e.target); });
+  const rootIds = A.nodes.filter(n=>n.is_root).map(n=>n.id);
+  const hasChild = id => (childrenOf[id]||[]).length>0;
+  const collapsed = new Set(A.nodes.filter(n=>hasChild(n.id)).map(n=>n.id));
+
+  function archDisp(n, pfx){
+    let txt = pfx + n.label;
+    if(n.impls && n.impls.length) txt += '\n(+' + n.impls.length + ' 实现)';
+    return txt;
+  }
+
+  const cy = cytoscape({
+    container: document.getElementById('cy-arch'),
+    elements:{
+      nodes: A.nodes.map(n=>({data:{...n, disp:archDisp(n,'')}})),
+      edges: A.edges.map((e,i)=>({data:{id:'a'+i,source:e.source,target:e.target,
+                                        primary:e.kind, elabel:e.kind==='dominates'?'':e.kind}})),
+    },
+    style: umlStyle().concat([
+      {selector:'edge[primary="dominates"]',style:{
+        'line-style':'dotted','line-color':'#cbd5e1','width':1.2,
+        'target-arrow-shape':'none','source-arrow-shape':'none'}},
+    ]),
+    wheelSensitivity:0.2,
+  });
+
+  function visibleSet(){
+    const vis=new Set(rootIds);
+    let changed=true;
+    while(changed){
+      changed=false;
+      for(const id of [...vis]){
+        if(!collapsed.has(id)){
+          for(const c of (childrenOf[id]||[])){ if(!vis.has(c)){vis.add(c);changed=true;} }
+        }
+      }
+    }
+    return vis;
+  }
+  function apply(){
+    const vis=visibleSet();
+    cy.batch(()=>{
+      cy.nodes().forEach(n=>{
+        const id=n.id();
+        n.style('display',vis.has(id)?'element':'none');
+        const pfx = hasChild(id) ? (collapsed.has(id)?'[+] ':'[−] ') : '';
+        n.data('disp', archDisp(n.data(), pfx));
+      });
+      cy.edges().forEach(e=>{
+        e.style('display',(vis.has(e.source().id())&&vis.has(e.target().id()))?'element':'none');
+      });
+    });
+    cy.layout({name:'dagre',rankDir:'TB',nodeSep:26,rankSep:56,
+               fit:true,padding:24,animate:false}).run();
+  }
+  function collapseSubtree(id){
+    collapsed.add(id);
+    for(const c of (childrenOf[id]||[])) collapseSubtree(c);
+  }
+  cy.on('tap','node',evt=>{
+    const id=evt.target.id();
+    if(!hasChild(id)) return;
+    if(collapsed.has(id)) collapsed.delete(id); else collapseSubtree(id);
+    apply();
+  });
+  apply();
+})();
+
+/* Section 2: all relations, UML */
 makeGraph('cy-rel', e=>true, 'LR');
 
 /* Section 3: design review */

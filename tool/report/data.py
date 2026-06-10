@@ -32,6 +32,7 @@ def build_payload(db):
     utilities = {n for n in g.nodes if classify_utility(g, n)}
 
     graph = _build_graph_payload(g, db, roots, label, C, orch_name, utilities)
+    arch = _build_arch(g, rep, C, label, roots, orch_name, utilities)
     review = _build_review(db)
 
     summary = {
@@ -40,7 +41,75 @@ def build_payload(db):
         'file_count': _get(orchestrator, 'file_count'),
         'orchestrator': orch_name,
     }
-    return {'summary': summary, 'graph': graph, 'review': review}
+    return {'summary': summary, 'graph': graph, 'arch': arch, 'review': review}
+
+
+def _build_arch(g, rep_map, C, label, roots, orch_name, utilities):
+    """架构分析 = the dominator forest. Each edge is parent→child in
+    the WORKFLOW hierarchy (ownership of responsibility), which is not
+    always a direct dependency: Logger may hang under OrderService
+    because all paths to it pass through OrderService, even though
+    OrderService itself never touches Logger.
+
+    For each tree edge we attach the real relationship kind when a
+    direct edge exists (so the UI can draw proper UML notation), else
+    kind='dominates' (drawn as a dotted grey line).
+
+    Folded families annotate their representative: NotificationChannel
+    that absorbed EmailChannel/SmsChannel gets impls=['EmailChannel',
+    'SmsChannel'] so the node can read 'NotificationChannel (+2 impls)'.
+    """
+    # representative → folded-away members
+    family = {}
+    for child, parent in rep_map.items():
+        family.setdefault(parent, []).append(child)
+
+    nodes, edges = [], []
+    seen = set()
+
+    def kind_between(src_lbl, tgt_lbl):
+        """Strongest direct relationship between two condensed labels,
+        considering folded members on both sides."""
+        srcs = [src_lbl] + family.get(src_lbl, [])
+        tgts = {tgt_lbl, *family.get(tgt_lbl, [])}
+        best, best_lv = None, -1
+        for s in srcs:
+            if s not in g.adj:
+                continue
+            for t, d in g.adj[s].items():
+                if t in tgts:
+                    for k in d.get('kinds', set()):
+                        if _LEVEL_OF.get(k, 0) > best_lv:
+                            best, best_lv = k, _LEVEL_OF.get(k, 0)
+        return best
+
+    def visit(cid, parent_lbl, depth):
+        lbl = label[cid]
+        if lbl in seen:
+            return
+        seen.add(lbl)
+        kids = _children(C, cid)
+        impls = sorted(m.split('::')[-1] for m in family.get(lbl, []))
+        nodes.append({
+            'id': lbl, 'label': lbl.split('::')[-1], 'qname': lbl,
+            'depth': depth, 'is_root': parent_lbl is None,
+            'has_children': len(kids) > 0,
+            'impls': impls,
+            'is_orch': 1 if lbl == orch_name else 0,
+            'is_util': 1 if lbl in utilities else 0,
+        })
+        if parent_lbl is not None:
+            k = kind_between(parent_lbl, lbl)
+            edges.append({'source': parent_lbl, 'target': lbl,
+                          'kind': k or 'dominates'})
+        for ch in kids:
+            visit(ch, lbl, depth + 1)
+
+    for root in roots:
+        if len(_children(C, root)) > 0:
+            visit(root, None, 0)
+
+    return {'nodes': nodes, 'edges': edges}
 
 
 # ── Graph payload (shared by 架构分析 + 详细关系, UML rendering) ──
