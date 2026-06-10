@@ -1,10 +1,31 @@
-"""data.py — assemble the report payload for the three-section UI.
+"""data.py — turns the database into the report's JSON payload.
 
-Section 1 (架构分析):   dominator forest as a collapsible node/edge tree.
-Section 2 (详细关系):   relationship graph (nodes + level-colored edges).
-Section 3 (设计审视):   high-level problems + class/function-level problems.
+build_payload(db) → one JSON-serializable dict with four keys:
 
-Pure function: build_payload(db) -> dict (JSON-serializable).
+  summary  header line + architecture-style warning (oop/mixed/crtp)
+  arch     Section 1: the dominator forest as parent→child rows.
+           Each edge carries the real relationship kind when a direct
+           dependency backs it, or 'dominates' when the hierarchy is
+           pure attribution (e.g. Logger under OrderService although
+           OrderService never touches Logger directly).
+  graph    Section 2: the UML class diagram. Multi-edges between the
+           same pair are collapsed into ONE edge that remembers every
+           kind (label) and the strongest kind (notation).
+  review   Section 3: DesignCritic output reshaped into two ladders —
+           high-level issues (recommendations / cross-observations /
+           missing abstractions) and per-class pain points.
+
+DESIGN RULES BAKED IN HERE
+  - Phantom classes (declaration never seen; inferred from .cxx
+    out-of-line methods) are EXCLUDED from both diagrams: only code
+    whose full definition is in scope is what the user is analyzing.
+  - External domain types (IIteration, ResultParameters...) ARE shown
+    as dashed boxes, but config-enum noise (JA_*, *_t, ALL_CAPS),
+    template fragments and std wrappers are filtered out.
+  - Initial visible set is adaptive: small projects (≤25 classes)
+    show everything; large ones start from the workflow roots.
+
+This file is a pure function of the DB — no LLM calls, no file I/O.
 """
 import json
 

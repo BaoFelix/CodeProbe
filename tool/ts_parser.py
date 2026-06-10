@@ -1,10 +1,59 @@
 """
-ts_parser.py — tree-sitter based C++ parser
+ts_parser.py — the C++ parsing engine, built on tree-sitter.
 
-Phase 2 scope: extract entities only. Relationships come in Phase 3.
+WHAT THIS FILE DOES
+  Turns raw C++ source files into two lists:
+    entities      — every named thing: namespace / class / struct /
+                    interface / method / field
+    relationships — who uses whom, in 6 kinds from weak to strong:
+                    depends(0) < associates(1) < implements(2)
+                    < aggregates(3) < composes(4) < inherits(5)
 
-Right now this handles namespaces, classes, structs. Methods and fields
-will be added in a follow-up step.
+WHY TREE-SITTER (the key technology choice)
+  - vs regex:    regex can't see nesting, comments, strings, templates.
+                 We replaced a 544-line regex reader with this engine
+                 and accuracy problems disappeared.
+  - vs libclang: clang is more precise BUT requires code that compiles
+                 (all headers present, all macros resolvable). Real
+                 users hand us partial code — a few .cxx files without
+                 their .hxx. tree-sitter parses anything and never
+                 gives up; that robustness is worth more than clang's
+                 extra precision for an architecture-level tool.
+
+HOW IT'S ORGANIZED (top to bottom)
+  1. Queries        — tree-sitter S-expression patterns that find
+                      class/method/field/inheritance nodes in the CST.
+  2. Type analysis  — classify_field_type() maps a field's type text
+                      to a relationship kind (unique_ptr<X> = composes,
+                      vector<X*> = aggregates, X* = associates ...).
+  3. parse_file()   — single-file pass: entities + relationships,
+                      same-file targets resolved immediately.
+  4. parse_sch_file() — regex fallback for the .sch private DSL
+                      (tree-sitter has no grammar for it; the DSL is
+                      simple enough that regex is the right tool here).
+  5. parse_project() — whole-directory pass: cache lookup, parallel
+                      parsing, alias expansion, phantom-class
+                      promotion, cross-file target resolution,
+                      interface re-tagging.
+
+REAL-WORLD HARDENING (each of these came from a bug found on a real
+codebase — spdlog, OpenCASCADE, Eigen, or Siemens Simcenter):
+  - export macros   (class SPDLOG_API logger) stripped before parsing
+  - typedef/using   aliases expanded so vector<sink_ptr> reaches sink
+  - templated bases (class X : Base<T>) captured in inheritance
+  - out-of-line     (void Foo::bar(){...}) methods attributed to Foo
+  - phantom classes promoted when only the .cxx is in scope
+  - vendored dirs   (third_party/, bundled/...) skipped by default
+  - '= 0' disambiguation: pure-virtual vs default arg vs body code
+
+PERFORMANCE
+  - parse cache: (mtime, size, PARSER_VERSION) fingerprint per file;
+    a re-scan of an unchanged tree is ~22x faster. We deliberately do
+    NOT hash file content — hashing requires reading the file, which
+    is most of what we were trying to skip.
+  - multiprocess: cache misses are parsed in parallel across CPU
+    cores (cache I/O stays in the main process because SQLite
+    connections can't cross process boundaries).
 """
 from pathlib import Path
 from dataclasses import asdict

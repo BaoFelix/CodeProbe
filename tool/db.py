@@ -1,13 +1,29 @@
 """
-db.py — SQLite database management
-═══════════════════════════════════════
-AI concept: Memory / State Persistence
-Key insight:
-  - SQLite instead of markdown — atomic INSERT/UPDATE won't corrupt other data
-  - DB is the pipeline's "working memory": which classes analyzed, results, what's next
-  - Each Agent reads input from DB, writes output back to DB
-  - Every method manages its own connection — thread-safe by design
-═══════════════════════════════════════
+db.py — SQLite persistence: the pipeline's shared memory.
+
+Agents never talk to each other directly — ScannerAgent writes the
+graph here, DesignCriticAgent reads it and writes its analysis back,
+the report reads everything. One process can crash and another can
+resume because the state lives here, not in objects.
+
+TABLES
+  entities              every named thing (class/method/field/...)
+                        keyed by qualified_name; parent_qname is a
+                        STRING not a foreign key — bulk insert needs
+                        no id lookups and debugging stays readable
+  relationships         one row per evidence: the same class pair can
+                        have multiple rows of different kinds (that
+                        multi-edge richness is a core design feature)
+  module_info           one row per scan: orchestrator, style, counts
+  design_critic_subtree DesignCritic pass-1 results (one per subtree)
+  design_critic_module  DesignCritic pass-2 synthesis
+  parse_cache           per-file parse results keyed by
+                        (mtime, size, PARSER_VERSION) — 22x re-scan
+  llm_cache             prompt-hash → response; same question never
+                        costs API money twice
+
+Every method opens and closes its own connection — simple and
+thread-safe (the LLM step used to run 3 threads in parallel).
 """
 import sqlite3
 from pathlib import Path

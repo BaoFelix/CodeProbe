@@ -1,12 +1,35 @@
-"""template.py — three-section report.
+"""template.py — the single-page interactive HTML report.
 
-1. 架构分析  — UML class diagram, STRUCTURAL relations only
-              (inherits / implements / composes / aggregates).
-2. 详细关系  — UML class diagram, ALL relations.
-   Both: proper UML notation (triangles / diamonds / arrows), edge
-   labels, dashed external nodes, and expand/collapse (default
-   collapsed, reveal neighbors on click).
-3. 设计审视  — nested collapsibles: high-level then class/function.
+THE PAGE (top to bottom)
+  1. Architecture   the workflow tree, rendered as a VSCode-style
+                    indented outline (<details> elements). A tree is
+                    fundamentally a tree — forcing it through a graph
+                    library just made it worse. Each row leads with
+                    the UML glyph of the parent→child relationship
+                    (◆ composes ◇ aggregates → associates △ inherits
+                    ┄△ implements ····· dominates) plus badges
+                    (orchestrator / utility / +N impls).
+  2. Relationships  a Cytoscape.js UML class diagram. Edge notation
+                    follows UML: hollow triangle = inheritance, solid
+                    diamond = composition, etc. Nodes expand/collapse
+                    on click and are freely draggable.
+  3. Design Review  DesignCritic results as nested collapsibles —
+                    everything collapsed by default, titles first.
+
+INTERACTION MODEL FOR THE GRAPH (learned the hard way)
+  Lay out ONCE (cose-bilkent — the anti-overlap layout), then never
+  re-run a layout again. Expand/collapse toggles only visibility
+  (n.show()/n.hide()) and animates the CAMERA to fit. This is the
+  pattern used by Obsidian/Sourcegraph/GitHub graph views: node
+  positions never change behind the user's back, so their spatial
+  memory of "Engine is on the right" keeps working. A Reset-layout
+  button recovers from messy manual dragging.
+
+DELIVERY MODEL
+  One self-contained .html file: CSS+JS inline, only the graph
+  libraries loaded from CDN. No build step, no server — generate,
+  double-click, done. The payload from data.py is injected by
+  replacing the __PAYLOAD__ token below.
 """
 import json
 

@@ -1,198 +1,191 @@
 # CodeProbe Architecture
 
-> 这份文档讲 CodeProbe 的代码分析引擎"是什么、为什么这么设计、代价在哪"。
-> 配对文档:[`LearningLog.md`](LearningLog.md) — 这一段开发过程中学到的可迁移经验。
+> The presenter's guide. Read top-to-bottom once and you can explain
+> the whole system; each section is one slide's worth of material.
+> Companion file: [`LearningLog.md`](LearningLog.md) — the transferable
+> lessons learned while building it.
 
 ---
 
-## 一句话定位
+## 1. One sentence
 
-把一个 C++ 代码库**转成有结构的依赖图**,然后从图里**自动认出架构核心**(orchestrator)、自动**收掉噪音**(工具类、多态实现)、自动**画出层层递进的职责树**——给人看大模块用,不是给编译器用。
+CodeProbe reads a C++ codebase (even a partial one), builds an accurate
+entity-relationship graph with tree-sitter, derives the architecture
+(orchestrator, utilities, workflow hierarchy) with graph algorithms,
+has an LLM audit the design top-down, and ships everything as one
+interactive HTML file.
 
----
-
-## 数据模型
-
-### 实体(Entity)
-
-每一行是一个"代码里能命名的东西"。**类、结构体、方法、字段、命名空间** 都是实体。
-
-| 字段 | 是什么 |
-|---|---|
-| `kind` | class / struct / interface / enum / method / field / namespace |
-| `name` | 短名,如 `logger` |
-| `qualified_name` | 完整路径,如 `spdlog::details::logger` |
-| `parent_qname` | 它的"父亲"实体的 qualified_name(命名空间含类、类含方法) |
-| `file_path`, `start_line`, `end_line` | 在源码里的位置 |
-| `signature` | 方法用完整签名;字段用类型字符串;类为空 |
-| `attrs` | 杂项 JSON(`abstract`、`is_virtual` ...) |
-
-**关键设计:`parent_qname` 是字符串,不是外键 ID。**
-理由:批量写入时不需要"先插父、查 id、再插子"的麻烦,任意顺序插就行。代价是没有 SQL 层的外键约束——但我们每次 `clear_graph()` 是全清重建,不会出现"孤儿"。
-
-### 关系(Relationship)
-
-每一条边代表"A 跟 B 有种联系"。**同一对 (A, B) 允许多条边**(不同 kind 的证据各算一条)。
-
-6 种 kind,从弱到强:
-
-| kind | Lv | 含义 | 触发条件 |
-|---|---|---|---|
-| `depends` | 0 | A 用了 B 的代码(签名层面或方法体里) | 方法参数/返回类型出现 B |
-| `associates` | 1 | A 弱引用 B | 字段是裸指针 / shared_ptr / handle |
-| `implements` | 2 | A 实现 B 的接口 | A 继承一个抽象基类/接口 |
-| `aggregates` | 3 | A 装一堆 B 但不独占 | 字段是 `vector<B*>` 等容器装指针 |
-| `composes` | 4 | A 独占 B | 字段是值类型 / unique_ptr |
-| `inherits` | 5 | A 是 B 的子类(具体继承) | A 继承一个具体基类 |
-
-**关键设计:多边并存,不是"保留最强一条"。**
-旧 schema 用 `UNIQUE(source, target)`,所以 Workshop 跟 Engine 既 compose 又 aggregate 又 associate 时只能留最强一条,丢掉了 3/4 证据。新模型 4 条边都进表,LLM 看到完整证据。
-
-**关键设计:`#include` 不算 depends。**
-include 只表明"可用",不是"使用"。真正的"使用"是签名里出现该类型——这才发出 depends 边。
-
----
-
-## 解析流水线
+## 2. The data flow (the only diagram you need)
 
 ```
-源文件
-   ↓ (tree-sitter parser, 把宏抹掉)
-CST 抽象语法树
-   ↓ (跑 query)
-单文件实体 + 单文件关系(同文件目标已解析)
-   ↓ parse_project 跨文件聚合
-所有文件汇总
-   ↓ 别名展开(typedef / using)
-全局短名 → qualified_name 索引
-   ↓ 第二轮 resolve(填跨文件 target_qname)
-   ↓ 接口/抽象重新分类(全局视角)
-完整图谱
+ C++ sources (.hxx/.cxx/.h/.hpp/.sch — partial is fine)
+      │
+      ▼
+ ┌─────────────────┐   tree-sitter CST → entities + relationships
+ │ ts_parser.py    │   (cache: 22x re-scan · multiprocess first scan)
+ └─────────────────┘
+      │  entities: namespace/class/struct/interface/method/field
+      │  relationships: 6 kinds × evidence lines
+      ▼
+ ┌─────────────────┐   SQLite = shared memory between all stages
+ │ db.py           │   (entities, relationships, module_info,
+ └─────────────────┘    critic results, parse cache, LLM cache)
+      │
+      ├──────────────────────────────┐
+      ▼                              ▼
+ ┌─────────────────┐         ┌──────────────────┐
+ │ workflow.py     │         │ design_critic.py │
+ │ graph analysis  │         │ two-pass LLM     │
+ │ · orchestrator  │         │ · per-subtree    │
+ │ · utilities     │         │ · module synth   │
+ │ · dominator tree│         │ (skill-overridable)
+ └─────────────────┘         └──────────────────┘
+      │                              │
+      └──────────────┬───────────────┘
+                     ▼
+            ┌─────────────────┐
+            │ report/         │  one self-contained HTML:
+            │ data + template │  1. Architecture (workflow tree)
+            └─────────────────┘  2. Relationships (UML diagram)
+                                 3. Design Review (LLM findings)
 ```
 
-### 关键模块
+Two agents orchestrate this: **ScannerAgent** (no LLM — parsing + graph
+math) and **DesignCriticAgent** (LLM). `pipeline.py` wires them;
+`run.py analyze` is the entry point.
 
-| 文件 | 职责 |
-|---|---|
-| `tool/ts_parser.py` | tree-sitter 解析 / 实体抽取 / 关系抽取 / 跨文件解析。包含 `.sch` 私有 DSL 的 regex 兜底路径(`parse_sch_file`)。 |
-| `tool/model.py` | Entity / Relationship 数据类(6 种 kind 的唯一定义在此) |
-| `tool/db.py` | 只有 entities + relationships + responsibility_analysis + design_proposals + module_info 表。API 干净到 4 个查询入口:`get_entities` / `get_entity` / `get_classes` / `get_relationships`。 |
-| `tool/source_io.py` | 文件 IO(encoding 探测、按 qualified_name 查文件路径)。85 行,替代旧 reader.py 的非解析部分。 |
-| `tool/workflow.py` | 建图 / orchestrator 打分 / SCC 缩点 / 抽象折叠 / 支配树 / 职责树 / 架构风格检测(oop / mixed / crtp)。 |
-| `tool/agents.py` | ScannerAgent(用引擎)、ResponsibilityAgent(LLM 喂上下文)、DesignAgent(LLM 出方案)。 |
-| `tool/report/row_shapes.py` | 把 db.py 的自然行重塑成报告层期望的字典字段名。**适配住在消费者那一侧**,不让数据层背展示层的词汇。 |
+## 3. Module map
 
----
-
-## Workflow 分析(orchestrator 识别 + 职责树)
-
-5 步:
-
-```
-关系列表
-  → build_graph         类级有向加权图(边权按 kind)
-  → fold_abstractions   抽象折叠(默认 leaves 模式)
-  → condense            Tarjan SCC 缩点,环收成 cluster(A,B,...)
-  → score_nodes         打分:出度+reach-入度
-  → responsibility_tree 支配树 + 深度截断
-```
-
-### 边权(workflow.py)
-
-```python
-_KIND_WEIGHT = {
-    'inherits':   1.0,
-    'composes':   1.0,
-    'aggregates': 0.8,
-    'implements': 0.7,
-    'associates': 0.6,
-    'depends':    0.3,
-}
-```
-
-可调。理由:结构关系(继承、独占)比"我用过你"(depends)更强。
-
-### Orchestrator 打分
-
-```
-score = weighted_out_degree + 0.5 × reach − 0.8 × weighted_in_degree
-```
-
-- **出度大**:协调很多东西
-- **reach 大**:能拉起一大片下游
-- **入度小**:很少被别人依赖(orchestrator 是"管别人的",不是"被管的")
-
-`classify_utility(g, n)` 反过来:**入度 ≥ 2 + 出度 = 0 + reach = 0** → 工具/基础设施,自动分流到侧栏。
-
-### 抽象折叠(三档可配,默认 `leaves`)
-
-| mode | 行为 | 适合 |
+| File | Role | Lines |
 |---|---|---|
-| `none` | 不折,原图 | 想看一切细节 |
-| `leaves`(默认) | 只折"叶子类",且只折进有 ≥2 子类的"真家族" | 通用,自动适配两种代码风格 |
-| `all` | 折到最顶层基类 | 浅继承的应用型代码 |
+| `tool/ts_parser.py` | The parsing engine. Queries, type classification, single-file pass, `.sch` regex fallback, project pass (cache/parallel/aliases/phantoms/resolution) | ~1000 |
+| `tool/model.py` | `Entity` + `Relationship` dataclasses. **Single source of truth for the 6 relationship kinds** | 90 |
+| `tool/workflow.py` | Graph analysis: orchestrator scoring, utility detection, style detection (oop/mixed/crtp), SCC condensation, abstraction folding, dominator tree | 370 |
+| `tool/db.py` | SQLite layer. 7 tables incl. both caches | 480 |
+| `tool/design_critic.py` | Two-pass LLM design audit; user-overridable via `skills/design_critic.md` | 385 |
+| `tool/_critic_lenses.py` `_critic_phases.py` | The embedded review methodology, split across two files. **The order of analysis steps is the method** | 200 |
+| `tool/llm.py` | One front door for LLM calls: cache → call → 429-fallback → write-through | 260 |
+| `tool/agents.py` | ScannerAgent (scan + persist + summary) | 120 |
+| `tool/pipeline.py` | 2-step coordinator + CLI behaviors (init/analyze/status/report) | 230 |
+| `tool/report/data.py` | DB → JSON payload (pure function) | 400 |
+| `tool/report/template.py` | The HTML/CSS/JS shell; payload injected as one token | 520 |
+| `tool/source_io.py` | Encoding-tolerant file reading | 33 |
+| `tool/mcp_server.py` | Optional MCP server so AI agents can drive the tool | 165 |
 
-**关键设计:`≥2 子类`守卫**。否则一个 orchestrator 顺手实现了某个独家接口,会被错误地折进那个接口里(test_src 的 Workshop → ILogger 就是反例)。
+## 4. The six relationships (the vocabulary of the whole system)
 
-### 支配树
-
-`nx.immediate_dominators(C, root)` 算出每个节点的"直接支配者"。
-**支配关系 = 职责归属**:A 支配 B → 所有依赖路径到 B 都要经过 A → B 这块职责归 A 管。
-共享节点(如 Engine 被 Vehicle 和 Dashboard 都用到)**自动浮到公共支配者那一层**,不会在每个用它的人下面重复画——这是免费魔法,你一行规则没写。
-
-### 多根森林
-
-入度 0 的节点都是独立 workflow 的根(`find_roots`)。一个项目可以有多个根 = 多个独立工作流(Workshop / Vehicle / Outer 在 test_src 是 3 个独立故事)。每个根算一棵自己的支配树。
-
-### 深度截断 + 层内排序
-
-支配树建好后,`responsibility_tree(C, label, root, max_depth=k)` 在第 k 层切断,**同一层内按子树重量降序排**——浅视图永远先露出"管最多事"的那几个,这才符合"快速理解大模块"的目标。
-
----
-
-## 关键设计决策汇总(选什么 + 弃什么 + 为什么)
-
-| 决策 | 选了 | 弃了 | 为什么 |
+| kind | level | meaning | detected from |
 |---|---|---|---|
-| **解析器** | tree-sitter | regex / Clang | regex 不懂语法、错误率没上限;Clang 太重且不容错,我们要扫半成品/跨语言代码 |
-| **数据模型** | 实体-关系图 | 类的属性表 | 旧模型方法/字段不是实体,无法回答"X 类内部有什么"和"方法 A 调方法 B" |
-| **parent_qname** | 字符串 | 整数外键 | 批量插入不需要 ID 映射;调试可读;每次重建图无孤儿风险 |
-| **多边** | 同对类多条边并存 | UNIQUE 留最强一条 | 不丢证据;LLM 看完整佐证;orchestrator 打分能用边数 |
-| **depends 定义** | "用了 B 的代码"(签名/body) | 把 `#include` 也算上 | include 是"可用"不是"使用";include 噪音大,把每个 file 里所有类都关联到所有 include 上太脏 |
-| **calls 这个 kind** | 取消,合并进 depends | 单独存在 | 当前目标(orchestrator)不需要方法级粒度;body call 抽取在 C++ 里又难又脆;真要做可用 attrs.via 区分 |
-| **接口判定** | 看是否全纯虚 + 无字段 | I 前缀命名约定 | 名字会骗人(Iterator 不是接口、sink 是抽象类却没 I);规则可证伪 |
-| **target_qname 歧义** | 留 NULL | 猜一个 | 猜错一次污染依赖图;留 NULL LLM 至少知道"这边不知道" |
-| **跨文件 base 重判** | 全局二轮 retag | 单文件判完不动 | 单文件无法知道远方基类是否抽象;retag 是廉价的修正 |
-| **抽象折叠** | 默认折叶子(`leaves`)+ ≥2 家族 | 默认折到顶 | 折到顶把 OCCT 几何分类压平成一坨;只折叶子保留中间分类层 |
-| **第三方目录** | 默认排除 vendored/bundled | 一律纳入 | 内嵌的 fmt 库污染 spdlog 的 orchestrator 排名 |
-| **导出宏** | 解析前抹掉 | 让 tree-sitter 直面 | 不抹会把 `SPDLOG_API` / `Standard_EXPORT` 当类名/类型,整个类体丢失 |
-| **CRTP/模板风格** | 检测后告警,不强行打分 | 改打分公式覆盖两种风格 | CRTP 颠倒了"orchestrator = 高出度"的假设;两套公式让两边都半吊子;诚实告警>装作通用 |
-| **`.sch` 私有 DSL** | regex 路径单独处理,但产出同样的 Entity/Relationship | 写 grammar / 一律按 C++ 强解析 | grammar 过度工程;按 C++ 解析会崩(superclass/forward_declare 关键字不存在);regex 限制清楚地写在 docstring 里 |
-| **删旧表 + 删旧 API** | 一次性删干净 | 保留兼容适配层 | 半吊子重构最坏(名字旧、底层新、看的人困惑);彻底删让 db.py 只有 entities/relationships 一个真相 |
-| **适配住消费者一侧** | 报告层在自己包内的 `row_shapes.py` 重塑 | 数据层背展示层字段名 | 字段名 `class_name`/`level_name` 是报告的词汇;让数据层用展示层的词汇 = 让低层迁就高层 = 倒挂 |
+| `depends` | 0 | A uses B's code | B appears in A's method signatures |
+| `associates` | 1 | weak reference | field `B*` / `shared_ptr<B>` / `occ::handle<B>` |
+| `implements` | 2 | A realizes interface B | base B is abstract (real check, not name convention) |
+| `aggregates` | 3 | A holds many B, shared | field `vector<B*>`-style container of pointers |
+| `composes` | 4 | A owns B | field `B` by value / `unique_ptr<B>` |
+| `inherits` | 5 | A is-a concrete B | base B has no pure virtuals |
 
----
+Key decisions inside this table:
+- **`#include` is NOT a dependency.** Includes mean "available", not
+  "used". Only an actual appearance in a signature counts.
+- **Multi-edges are kept.** If A composes B *and* aggregates B *and*
+  calls B, that's three rows of evidence — the report shows all of
+  them; the diagram renders the strongest and labels the rest.
+- **interface vs abstract is decided by shape, not by name.** A class
+  with pure virtuals and no data is an interface; with pure virtuals
+  plus data/concrete methods it's an abstract base. The earlier
+  "I-prefix" heuristic mislabeled real code (spdlog's `sink`) and died.
 
-## 已知局限
+## 5. Ten design decisions worth explaining (with the rejected option)
 
-按"诚实承认,而非装作全知"的原则列出:
+1. **tree-sitter over libclang** — clang needs compilable code; users
+   hand us partial code. An architecture tool needs robustness more
+   than perfect type resolution. (Regex was the original approach;
+   544 lines of it could not survive nesting/comments/templates.)
 
-1. **方法体调用图(`calls` 边)未抽取** — 当前目标不需要;真要做需补"成员字段调用 + 参数调用"的窄子集。
-2. **`.sch` 私有 DSL 未处理** — 走另一条 regex 路径,目前未实现(test_src 没用到)。
-3. **C++ 模板特化**:`Container<int>` 与 `Container<float>` 视为同一个类(我们抽到的是模板名)。对架构分析够用,对类型精确分析不够。
-4. **歧义短名**:跨命名空间同名类(如多个 `Plot`)留 `target_qname=NULL` 不猜,需要 include 上下文消歧——未实现。
-5. **接口规则**:基于"全纯虚 + 无字段"。C++23 concepts、模板基类(SFINAE 接口)未覆盖。
-6. **OCCT 风格的 namespace 命名空间共享类名**:有时同一短名在多个深层 namespace 下都存在,目前会被标 ambiguous 而不解析。
-7. **Orchestrator 打分公式系数**写死(`+0.5×reach`、`-0.8×in`),没做项目自适应。
-8. **CRTP / 模板元编程项目不在甜区** — Eigen 这类代码的"架构核心"是被继承的基类(高入度、低出度),跟我们打分公式的假设相反。我们用 `detect_style` 主动告警 `style='crtp'` 提示用户绕过 orchestrator 排行榜,直接看 inherits 家族。**不试图用一套公式覆盖两种风格,因为这只会让两边都半吊子。**
-9. **`.sch` 方法不抽** — 私有 DSL 的方法签名形态太多变,regex 路径只抽类 + 继承 + 字段。**对架构分析够用**,要看方法细节就回退到 .hxx。
+2. **`parent_qname` is a string, not a foreign key** — bulk inserts
+   need no id lookups, debugging is readable, and we rebuild the whole
+   graph each scan so referential integrity adds nothing.
 
----
+3. **Evidence-per-row relationships** — `UNIQUE(source,target)` would
+   force "keep the strongest". Keeping all rows preserves information
+   the report and the LLM both use.
 
-## 数据/状态边界
+4. **Dominator tree for the workflow view** — "must every path to B
+   pass through A?" is precisely "does A own B's responsibility?".
+   Shared utilities float to the common dominator for free.
 
-- **纯函数**:`parse_file`、`parse_project`、`build_graph`、`fold_abstractions`、`condense`、`responsibility_tree`、`classify_field_type`、`_innermost_type_name`、`_resolve_alias_chain` — 同一输入必然同一输出,无副作用。
-- **可变状态**:只在 `_refine_class_kinds`(mutates entities in place)和 `parse_project` 内的 retag 阶段(mutates relationships)。两者都是"全图构造期"修订,对外仍是纯函数式接口。
-- **磁盘 I/O**:只在 `parse_file` 的源码读取。DB 写入由调用者负责。
+5. **Folding defaults to leaves-only** — collapsing `tcp_sink…` into
+   `sink` cleans polymorphic noise, but folding everything to the top
+   (the first attempt) flattened OpenCASCADE's `Geom_Curve → Conic →
+   Circle` taxonomy into mush. Folding only leaf families (≥2 siblings)
+   keeps intermediate layers.
 
-这个边界让引擎容易测试、可以并行(将来加并发解析时无锁可加)。
+6. **Style detection over false universality** — CRTP codebases (Eigen)
+   invert the orchestrator signature: the architectural core is the
+   most-INHERITED class, not the most-outgoing. We detect the style and
+   display a warning instead of silently mis-ranking.
+
+7. **Phantom classes: promoted in the engine, hidden in the UI** —
+   out-of-line methods in a lone `.cxx` imply a class whose header we
+   never saw. The engine materializes it (so its methods and the LLM
+   review still work), but diagrams exclude it — only fully-defined
+   code is what the user is analyzing.
+
+8. **(mtime,size) cache fingerprint, not content hash** — hashing
+   requires reading the file, which is most of the cost we're trying
+   to skip. False match requires same-size same-mtime different
+   content: not a real workflow.
+
+9. **Layout once, never again** — the graph lays out with cose-bilkent
+   a single time; expand/collapse toggles visibility and animates the
+   camera. Re-running layouts on every click (two earlier attempts)
+   destroyed the user's spatial memory. Users can drag nodes; a Reset
+   button recovers.
+
+10. **LLM methodology as data, not code** — the review method lives in
+    prompt templates (`_critic_lenses` + `_critic_phases`); a user can
+    replace it wholesale by dropping `skills/design_critic.md`. The
+    embedded default keeps its know-how in the *ordering* of analysis
+    steps, written in standard OOD vocabulary.
+
+## 6. The DesignCritic (the LLM stage) in 60 seconds
+
+```
+Pass 1 — for EACH workflow subtree (bounded context):
+    input : that subtree's classes, methods, fields, internal edges
+    output: essence („what is this fundamentally doing"),
+            ideal pipeline & components, pain points (file:line),
+            current-code → ideal-component mappings        (JSON)
+
+Pass 2 — once, over all Pass-1 essences + cross-subtree edges:
+    output: module workflow, repeated-pattern observations,
+            missing abstractions, prioritized recommendations
+```
+
+Why two passes: a single giant prompt loses local detail and blows the
+context window; per-subtree passes keep precision, the synthesis pass
+sees what no single subtree shows (e.g. "these two extractors share
+the same 6-stage skeleton — extract a base class").
+
+Both passes cache their responses (prompt-hash), so re-running costs
+nothing if nothing changed.
+
+## 7. Performance numbers (measured, not estimated)
+
+| scenario | before | after |
+|---|---|---|
+| Eigen/Core re-scan (cache) | 5.3 s | 0.24 s (~22×) |
+| Eigen/Core first scan (4 cores) | 5.3 s | 1.9 s (~2.7×) |
+| spdlog re-scan | 0.47 s | 0.15 s |
+| same LLM prompt twice | full API cost | 0 (cache) |
+
+## 8. Known limits (say these up front when presenting)
+
+- Method *bodies* are not analyzed — relationships come from
+  signatures and fields. Call-graph extraction was considered and
+  rejected: in C++ it requires overload resolution, and field/signature
+  evidence already captured everything our shop fixtures needed.
+- Template instantiations are not expanded (Eigen-style metaprogramming
+  is detected and warned about, not deeply modeled).
+- `.sch` private DSL gets a minimal regex parser (classes, superclass,
+  fields) — deliberately, since tree-sitter has no grammar for it.
+- The LLM stage needs an API key; everything else runs offline.

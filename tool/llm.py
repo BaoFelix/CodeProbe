@@ -1,13 +1,24 @@
 """
-llm.py — LLM call abstraction layer
-═══════════════════════════════════════
-AI concept: LLM API Integration
-Key insight:
-  - API uses OpenAI-compatible format → works with GitHub Models / any compatible endpoint
-  - Also supports Anthropic Messages API (Claude)
-  - Uses stdlib urllib, no need for requests package
-  - Pipeline doesn't care "how to call AI", just calls llm.generate(prompt)
-═══════════════════════════════════════
+llm.py — one front door for every LLM call.
+
+The rest of the codebase only ever calls llm.generate(prompt). What
+happens behind that call:
+
+  1. CACHE CHECK   sha256(model + system + prompt) is looked up in the
+                   llm_cache table. Hit → return instantly, zero cost.
+                   (Set LLM_NO_CACHE=1 to bypass while tuning prompts.)
+  2. API CALL      two wire formats supported:
+                     "openai"    — OpenAI-compatible JSON (works with
+                                   GitHub Models and most providers)
+                     "anthropic" — Claude Messages API
+                   stdlib urllib only; no requests dependency.
+  3. 429 FALLBACK  rate-limited? walk LLM_FALLBACK_MODELS down the
+                   chain (gpt-4o → gpt-4o-mini → ...) automatically.
+  4. WRITE-THROUGH successful responses are cached for next time.
+
+Why the cache hash includes the model name: switching models must
+invalidate old answers — a cached gpt-4o-mini response is not an
+acceptable answer to a gpt-4o question.
 """
 import hashlib
 import json

@@ -1,17 +1,39 @@
 """
-workflow.py — orchestrator detection & responsibility hierarchy
+workflow.py — graph analysis: orchestrator detection & the workflow tree.
 
-Built on the class-level dependency graph (entities + relationships from
-ts_parser). This is the ATTRIBUTION view: "which classes own which
-subsystems", computed with a dominator tree. It is NOT an execution-flow
-view — we don't track call order.
+WHAT THIS FILE ANSWERS
+  Given the class-level dependency graph from ts_parser:
+    "Which class is the coordinator (orchestrator)?"
+    "Which classes are plumbing (utilities)?"
+    "How do responsibilities nest?"  → the workflow tree in the report.
 
-Pipeline:
-    build_graph → condense SCCs → score nodes → pick root(s)
-    → dominator tree → route utilities → truncate by depth
+THE BIG IDEA: dominator tree = responsibility hierarchy
+  A dominator tree answers: "to reach class B from the root, must you
+  pass through class A?" If yes, B's responsibility belongs under A.
+  This gives the ATTRIBUTION view ("who owns what") — NOT an
+  execution-flow view (we never track call order; we don't need to).
 
-Everything rides on networkx primitives; we supply the judgement
-(weights, signatures, thresholds), not the algorithms.
+  A nice free property: a class used by several siblings (e.g. Logger
+  used by every service) automatically floats UP to their common
+  dominator instead of being duplicated under each user. Nobody wrote
+  a rule for that — it falls out of the math.
+
+PIPELINE (each step is a small function below)
+    build_graph         entities+relationships → weighted DiGraph
+    detect_style        warn when CRTP/template-heavy code would
+                        break our scoring assumptions
+    fold_abstractions   collapse impl families (tcp_sink → sink)
+    condense            Tarjan SCC: cycles become one "cluster" node,
+                        making the graph a DAG (dominators need that)
+    score_nodes         orchestrator score = out-degree + reach − in
+    classify_utility    inverse signature: used-by-many, uses-nothing
+    dominator_children  the tree itself (networkx immediate_dominators)
+
+WHY NETWORKX
+  Tarjan SCC, dominator trees, reachability — all textbook algorithms
+  with decades of optimization. We supply only the JUDGEMENT layer:
+  edge weights, score formulas, thresholds. Never re-implement
+  algorithms a library already does right.
 """
 from collections import Counter
 

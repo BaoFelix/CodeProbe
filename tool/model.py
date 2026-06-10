@@ -1,10 +1,19 @@
 """
-model.py — entity & relationship value objects
+model.py — the two value objects everything else speaks in.
 
-These are the in-memory representation of what the parser extracts.
+Entity        a named thing in the code: namespace / class / struct /
+              interface / method / field. Identified by qualified_name
+              ("UGS::SimulationPost::GraphCreation::CreateGraph").
+Relationship  one piece of evidence that A uses B, with a kind, a
+              source location, and the exact source line as proof.
+
+This file is THE single source of truth for the 6 relationship kinds
+and their strength levels (LEVEL_OF). If you ever add a kind, do it
+here and only here — parser, graph analysis, DB and report all import
+from this module.
+
 Pure data containers: no parsing logic, no DB knowledge. The parser
-produces them; db.py persists them; downstream (agents, prompts,
-report) consumes them.
+produces them; db.py persists them; workflow/report consume them.
 """
 from dataclasses import dataclass, field, asdict
 from typing import Optional
