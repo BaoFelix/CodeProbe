@@ -291,26 +291,27 @@ function makeGraph(containerId, edgePred){
     cy.batch(()=>{
       cy.nodes().forEach(n=>{
         const id=n.id();
-        n.style('display',vis.has(id)?'element':'none');
+        // Use Cytoscape's proper hide/show: setting 'display' via
+        // style() is fragile against re-running layouts (cose pulls
+        // hidden nodes back into its force calculation).
+        if(vis.has(id)) n.show(); else n.hide();
         const pfx = hasOut(id) ? (expanded.has(id)?'[−] ':'[+] ') : '';
         n.data('disp', disp(n.data(), pfx));
       });
-      cy.edges().forEach(e=>{
-        e.style('display',(vis.has(e.source().id())&&vis.has(e.target().id()))?'element':'none');
-      });
+      // Hiding a node auto-hides its connected edges in Cytoscape;
+      // no edge loop needed.
     });
-    // Force-directed layout (cose). The relationships graph is not a
-    // strict hierarchy — most edges are same-level dependencies — so
-    // dagre would compress everything into a wide flat strip and
-    // shrink the labels to dust. cose spreads nodes organically so
-    // each label gets room to breathe.
-    cy.layout({
+    // Lay out only the currently visible elements. cose scrambles
+    // every node it sees, so handing it the hidden ones would
+    // recompute their positions and re-introduce them on the next
+    // tap. randomize:false keeps already-placed nodes where they are.
+    cy.elements(':visible').layout({
       name:'cose',
-      fit:true, padding:30, animate:false,
+      fit:true, padding:30, animate:false, randomize:false,
       idealEdgeLength: 140,
       nodeRepulsion: 8000,
       gravity: 0.4,
-      numIter: 1200,
+      numIter: 600,
     }).run();
     clampZoom(cy);
   }
