@@ -343,8 +343,8 @@ function makeGraph(containerId, edgePred, dir){
     const relCls = kindFromParent ? ' ' + kindFromParent : '';
     let summary = '';
     summary += '<span class="twist"></span>';
-    summary += `<span class="rel${relCls}">${escapeHtml(glyph)}</span>`;
-    summary += `<span class="name">${escapeHtml(n.label)}</span>`;
+    summary += `<span class="rel${relCls}">${esc(glyph)}</span>`;
+    summary += `<span class="name">${esc(n.label)}</span>`;
     if(n.kind === 'interface') summary += '<span class="ster">«interface»</span>';
     if(n.kind === 'struct')    summary += '<span class="ster">«struct»</span>';
     if(n.is_orch) summary += '<span class="badge orch">orchestrator</span>';
