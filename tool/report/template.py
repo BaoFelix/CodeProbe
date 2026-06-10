@@ -81,6 +81,9 @@ _HTML = r"""<!DOCTYPE html>
 <header>
   <h1>CodeProbe</h1>
   <div class="meta" id="meta"></div>
+  <div id="style-warning" style="display:none;margin-top:8px;padding:8px 12px;
+       background:#fef9c3;border:1px solid #fde047;border-radius:6px;
+       font-size:12px;color:#713f12;"></div>
 </header>
 
 <section>
@@ -121,6 +124,16 @@ document.getElementById('meta').textContent =
    DATA.summary.orchestrator ? 'orchestrator: '+DATA.summary.orchestrator : '']
   .filter(Boolean).join('  ·  ');
 
+// Architecture-style warning (e.g. CRTP / template metaprogramming):
+// the orchestrator scoring assumes traditional OOP and may mislead.
+if (DATA.summary.style && DATA.summary.style !== 'oop') {
+  const w = document.getElementById('style-warning');
+  w.style.display = 'block';
+  w.textContent = '⚠ Architecture style: ' + DATA.summary.style + '. '
+    + (DATA.summary.style_note ||
+       'Orchestrator ranking may not reflect the true architectural cores.');
+}
+
 const STEREO = {interface:'«interface»', external:'«external»', struct:'«struct»'};
 
 function umlStyle(){
@@ -137,6 +150,8 @@ function umlStyle(){
     {selector:'node[kind = "struct"]',style:{'background-color':'#ecfdf5','border-color':'#0d9488'}},
     {selector:'node[is_external = 1]',style:{
       'background-color':'#fff','color':'#64748b','border-color':'#cbd5e1','border-style':'dashed'}},
+    {selector:'node[is_phantom = 1]',style:{
+      'background-color':'#fafaf9','color':'#78716c','border-color':'#a8a29e','border-style':'dashed'}},
 
     /* UML edge notations */
     {selector:'edge',style:{
@@ -165,7 +180,7 @@ function umlStyle(){
 }
 
 function disp(n, prefix){
-  const st = STEREO[n.kind];
+  const st = n.is_phantom ? '«phantom»' : STEREO[n.kind];
   return (st ? st+'\n' : '') + prefix + n.label;
 }
 
@@ -263,7 +278,7 @@ function makeGraph(containerId, edgePred, dir){
   const collapsed = new Set(A.nodes.filter(n=>hasChild(n.id)).map(n=>n.id));
 
   function archDisp(n, pfx){
-    let txt = pfx + n.label;
+    let txt = (n.is_phantom ? '«phantom»\n' : '') + pfx + n.label;
     if(n.impls && n.impls.length) txt += '\n(+' + n.impls.length + ' impls)';
     return txt;
   }
@@ -341,7 +356,7 @@ makeGraph('cy-rel', e=>true, 'LR');
       html+=`<details class="item"><summary><span class="pill ${pri}">${esc(p.priority||'info')}</span>`;
       html+=`<span>${esc(p.title)}</span></summary><div class="content">${renderKV(p.details)}</div></details>`;
     }
-  } else html+='<div class="empty">No high-level issues yet. Run <code>analyze</code> to generate.</div>';
+  } else html+='<div class="empty">No design review yet. Configure <code>LLM_API_KEY</code> in <code>.env</code> and run <code>python run.py analyze &lt;path&gt;</code> to generate it. Sections 1–2 above work without an LLM.</div>';
 
   html+='<h3>Class- / function-level issues</h3>';
   if((R.class_level||[]).length){

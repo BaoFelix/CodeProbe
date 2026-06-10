@@ -60,14 +60,3 @@ LLM_FALLBACK_MODELS = [
     os.environ.get("LLM_FALLBACK_MODELS",
                    "gpt-4o,gpt-4o-mini,Meta-Llama-3.1-405B-Instruct,Phi-4").split(",")
 ]
-
-# ─── Analysis settings ─────────────────────────────────────────────────
-# Files exceeding this line count use Code Query summary mode before analysis (RAG mode)
-MAX_LINES_DIRECT = 500
-
-# C++ file extensions
-HEADER_EXTS = {'.h', '.hxx', '.hpp', '.sch'}
-IMPL_EXTS = {'.cpp', '.cxx', '.c'}
-
-# Target module for analysis
-DEFAULT_MODULE = os.environ.get("CODEPROBE_MODULE", "default")

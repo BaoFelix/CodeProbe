@@ -562,17 +562,41 @@ def parse_file(file_path):
     seen_depends = set()  # dedupe (source_qname, target_name) per file
     for _idx, caps in QueryCursor(_METHOD_IN_CLASS_QUERY).matches(root):
         decl = caps['decl'][0]
-        parent = _enclosing_container_qname(decl, _CONTAINER_TYPES)
-        # Skip free functions (no enclosing class/struct)
-        if parent is None or not any(
-                a == 'class_specifier' or a == 'struct_specifier'
-                for a in _ancestor_types(decl)):
+        name_node = caps['name'][0]
+        raw_name = name_node.text.decode()
+        in_class = any(a in ('class_specifier', 'struct_specifier')
+                       for a in _ancestor_types(decl))
+        if in_class:
+            parent = _enclosing_container_qname(decl, _CONTAINER_TYPES)
+        elif '::' in raw_name:
+            # Out-of-line definition `void Foo::bar() {…}` — recover the
+            # class from the qualified declarator (same rule as the
+            # entity pass), so phantom classes participate in depends
+            # edges exactly as if their .hxx were in scope.
+            parts = raw_name.split('::')
+            ns_parent = _enclosing_container_qname(
+                decl, ('namespace_definition',))
+            inferred = '::'.join(parts[:-1])
+            parent = f'{ns_parent}::{inferred}' if ns_parent else inferred
+        else:
+            continue   # true free function
+        if parent is None:
             continue
 
-        # Mine names from the whole method declaration node — covers
-        # both return type (sibling of function_declarator) and
-        # parameter list (inside function_declarator → parameter_list).
-        for name in set(_type_names_in(decl)):
+        # Mine names from the SIGNATURE only — return type and parameter
+        # list. Skip the function body (compound_statement): in a .cxx
+        # function_definition the body is full of call expressions and
+        # local variables whose identifiers are not type references.
+        # Also exclude the declarator's own name segments: in an
+        # out-of-line definition `void Foo::bar(...)` the qualified
+        # declarator would otherwise be mined as a bogus dependency.
+        own_segments = set(raw_name.split('::'))
+        sig_names = set()
+        for child in decl.children:
+            if child.type == 'compound_statement':
+                continue
+            sig_names.update(_type_names_in(child))
+        for name in sig_names - own_segments:
             key = (parent, name)
             if key in seen_depends:
                 continue
@@ -604,7 +628,7 @@ def _ancestor_types(node):
 # Bump when parser logic changes so cached entries get invalidated.
 # Any edit to parse_file / parse_sch_file / extract_aliases /
 # classify_field_type / _refine_class_kinds should bump this.
-PARSER_VERSION = 1
+PARSER_VERSION = 3
 
 
 _CPP_EXTS = {'.h', '.hxx', '.hpp', '.cxx', '.cpp', '.c'}

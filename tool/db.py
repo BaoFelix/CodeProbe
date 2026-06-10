@@ -82,37 +82,15 @@ class DBManager:
                     orchestrator TEXT,
                     file_count INTEGER,
                     class_count INTEGER,
+                    style TEXT,          -- oop | mixed | crtp
+                    style_note TEXT,     -- human-readable warning when not oop
                     scan_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-
-                CREATE TABLE IF NOT EXISTS responsibility_analysis (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    class_name TEXT NOT NULL,
-                    actual_responsibilities TEXT,
-                    ideal_responsibility TEXT,
-                    srp_violations TEXT,
-                    extract_candidates TEXT,
-                    responsibility_tags TEXT,
-                    sin_diagnosis TEXT,
-                    full_analysis TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-
-                CREATE TABLE IF NOT EXISTS design_proposals (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    phase_plan TEXT,
-                    new_classes TEXT,
-                    interfaces TEXT,
-                    effort_total TEXT,
-                    mermaid_diagram TEXT,
-                    full_analysis TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
 
                 /* ── entity-relationship model ──────────────────────────
                    The whole graph lives here. The single source of
-                   truth: every consumer (ScannerAgent, ResponsibilityAgent,
-                   the report layer, the pipeline) queries entities +
+                   truth: every consumer (ScannerAgent, the report layer,
+                   the pipeline) queries entities +
                    relationships directly via get_entities /
                    get_relationships / get_classes / get_entity. */
 
@@ -209,14 +187,16 @@ class DBManager:
     # ─── Module info ─────────────────────────────────────────
 
     def save_module_info(self, module_name, directory=None, orchestrator=None,
-                         file_count=None, class_count=None):
+                         file_count=None, class_count=None,
+                         style=None, style_note=None):
         """Record one scan's summary row."""
         self._execute("""
             INSERT INTO module_info
-                (module_name, directory, orchestrator, file_count, class_count)
-            VALUES (?, ?, ?, ?, ?)
+                (module_name, directory, orchestrator, file_count,
+                 class_count, style, style_note)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (module_name, str(directory) if directory else None,
-              orchestrator, file_count, class_count))
+              orchestrator, file_count, class_count, style, style_note))
 
     def get_module_info(self, module_name=None):
         """Latest module_info row (for a specific module or overall)."""
@@ -231,85 +211,15 @@ class DBManager:
     # ─── Aggregates / dashboard ──────────────────────────────
 
     def get_stats(self):
-        """total / analyzed / pending counts for the dashboard."""
+        """total / analyzed / pending counts for the dashboard.
+        'analyzed' counts subtrees covered by the latest DesignCritic run."""
         return self._query_one("""
             SELECT
                 (SELECT COUNT(*) FROM entities
                   WHERE kind IN ('class','struct','interface')) AS total,
-                (SELECT COUNT(DISTINCT class_name)
-                  FROM responsibility_analysis) AS analyzed,
-                (SELECT COUNT(*) FROM entities
-                  WHERE kind IN ('class','struct','interface'))
-                - (SELECT COUNT(DISTINCT class_name)
-                    FROM responsibility_analysis) AS pending
+                (SELECT COUNT(DISTINCT subtree_root)
+                  FROM design_critic_subtree) AS analyzed
         """)
-
-    # ─── Responsibility Analysis CRUD ────────────────────────
-
-    def save_responsibility(self, class_name, parsed, full_analysis, arch_id=None):
-        """Save responsibility analysis results."""
-        return self._execute("""
-            INSERT INTO responsibility_analysis
-                (class_name, actual_responsibilities,
-                 ideal_responsibility, srp_violations, extract_candidates,
-                 responsibility_tags, sin_diagnosis, full_analysis)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (class_name,
-              parsed.get('actual_responsibilities', ''),
-              parsed.get('ideal_responsibility', ''),
-              parsed.get('srp_violations', ''),
-              parsed.get('extract_candidates', ''),
-              parsed.get('responsibility_tags', ''),
-              parsed.get('sin_diagnosis', ''),
-              full_analysis)).lastrowid
-
-    def get_responsibility(self, class_name, arch_id=None):
-        """Get responsibility analysis for a class."""
-        return self._query_one("""
-            SELECT * FROM responsibility_analysis
-            WHERE class_name = ?
-            ORDER BY id DESC LIMIT 1
-        """, (class_name,))
-
-    def get_all_responsibilities(self, arch_id=None):
-        """Get all responsibility analyses."""
-        return self._query_all("""
-            SELECT * FROM responsibility_analysis
-            ORDER BY class_name
-        """)
-
-    # ─── Design Proposals CRUD ───────────────────────────────
-
-    def save_design_proposal(self, parsed, full_analysis, arch_id=None):
-        """Save design proposal."""
-        return self._execute("""
-            INSERT INTO design_proposals
-                (phase_plan, new_classes, interfaces,
-                 effort_total, full_analysis)
-            VALUES (?, ?, ?, ?, ?)
-        """, (parsed.get('phase_plan', ''),
-              parsed.get('new_classes', ''),
-              parsed.get('interfaces', ''),
-              parsed.get('effort_total', ''),
-              full_analysis)).lastrowid
-
-    def get_latest_design(self, arch_id=None):
-        """Get latest design proposal."""
-        return self._query_one("""
-            SELECT * FROM design_proposals
-            ORDER BY id DESC LIMIT 1
-        """)
-
-    # ─── Delete (for --from restart) ──────────────────────────
-
-    def delete_design_proposals(self, arch_id=None):
-        """Delete design proposals."""
-        return self._execute("DELETE FROM design_proposals").rowcount
-
-    def delete_responsibilities(self, arch_id=None):
-        """Delete responsibility analyses + cascade delete design proposals."""
-        self.delete_design_proposals()
-        return self._execute("DELETE FROM responsibility_analysis").rowcount
 
     def delete_all_tasks(self):
         """Delete all scan data (graph + module_info)."""
@@ -322,11 +232,6 @@ class DBManager:
             conn.commit()
         finally:
             conn.close()
-
-    def delete_architecture(self):
-        """Delete architecture-level data (responsibilities + design proposals).
-        Kept for backward compatibility with pipeline --from=arch."""
-        self.delete_responsibilities()
 
     # ─── Entity / Relationship API (Phase 1) ──────────────────────
 

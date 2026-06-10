@@ -31,8 +31,14 @@ def build_payload(db):
     orch_name = _get(orchestrator, 'orchestrator')
     utilities = {n for n in g.nodes if classify_utility(g, n)}
 
-    graph = _build_graph_payload(g, db, roots, label, C, orch_name, utilities)
-    arch = _build_arch(g, rep, C, label, roots, orch_name, utilities)
+    phantoms = {e.qualified_name for e in entities
+                if e.kind in ('class', 'struct', 'interface')
+                and e.attrs.get('phantom')}
+
+    graph = _build_graph_payload(g, db, roots, label, C, orch_name,
+                                 utilities, phantoms)
+    arch = _build_arch(g, rep, C, label, roots, orch_name, utilities,
+                       phantoms)
     review = _build_review(db)
 
     summary = {
@@ -40,11 +46,13 @@ def build_payload(db):
         'class_count': _get(orchestrator, 'class_count'),
         'file_count': _get(orchestrator, 'file_count'),
         'orchestrator': orch_name,
+        'style': _get(orchestrator, 'style'),
+        'style_note': _get(orchestrator, 'style_note'),
     }
     return {'summary': summary, 'graph': graph, 'arch': arch, 'review': review}
 
 
-def _build_arch(g, rep_map, C, label, roots, orch_name, utilities):
+def _build_arch(g, rep_map, C, label, roots, orch_name, utilities, phantoms):
     """架构分析 = the dominator forest. Each edge is parent→child in
     the WORKFLOW hierarchy (ownership of responsibility), which is not
     always a direct dependency: Logger may hang under OrderService
@@ -97,6 +105,7 @@ def _build_arch(g, rep_map, C, label, roots, orch_name, utilities):
             'impls': impls,
             'is_orch': 1 if lbl == orch_name else 0,
             'is_util': 1 if lbl in utilities else 0,
+            'is_phantom': 1 if lbl in phantoms else 0,
         })
         if parent_lbl is not None:
             k = kind_between(parent_lbl, lbl)
@@ -162,7 +171,7 @@ def _root_of(C, cid):
     return cur
 
 
-def _build_graph_payload(g, db, roots, label, C, orch_name, utilities):
+def _build_graph_payload(g, db, roots, label, C, orch_name, utilities, phantoms):
     """One UML class-diagram dataset shared by both graph sections.
 
     nodes  — internal classes + external domain types (dashed boxes).
@@ -177,13 +186,14 @@ def _build_graph_payload(g, db, roots, label, C, orch_name, utilities):
     internal = set(g.nodes)
     nodes = []
     for n in g.nodes:
-        e = _entity_kind(db, n)
+        kind, _ = _entity_kind_phantom(db, n)
         nodes.append({
             'id': n, 'label': n.split('::')[-1], 'qname': n,
-            'kind': e,
+            'kind': kind,
             'is_orch': 1 if n == orch_name else 0,
             'is_util': 1 if n in utilities else 0,
             'is_external': 0,
+            'is_phantom': 1 if n in phantoms else 0,
         })
 
     from collections import defaultdict
@@ -244,9 +254,14 @@ def _build_graph_payload(g, db, roots, label, C, orch_name, utilities):
     return {'nodes': nodes, 'edges': edges, 'roots': root_qnames}
 
 
-def _entity_kind(db, qname):
+def _entity_kind_phantom(db, qname):
+    """(kind, is_phantom) for a class node. Phantom = declaration never
+    seen; inferred from out-of-line method definitions in a .cxx."""
     row = db.get_entity(qname)
-    return row['kind'] if row else 'class'
+    if not row:
+        return 'class', False
+    attrs = json.loads(row['attrs'] or '{}')
+    return row['kind'], bool(attrs.get('phantom'))
 
 
 
