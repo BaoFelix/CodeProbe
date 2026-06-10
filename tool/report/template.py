@@ -81,6 +81,15 @@ _HTML = r"""<!DOCTYPE html>
     border-left:1px dotted #d1d5db;
     margin-left:11px;            /* aligns the line under the twist */
     padding-left:14px;
+    position:relative;
+  }
+  /* downward chevron on each spine, telling the user the tree
+     reads top-to-bottom (parent → children flow down). */
+  .tree .children::before{
+    content:'▼';
+    position:absolute;left:-5px;top:-1px;
+    font-size:8px;color:#94a3b8;line-height:1;
+    background:var(--panel);padding:0 1px;
   }
   .legend{display:flex;flex-wrap:wrap;gap:14px;padding:8px 16px;font-size:11px;
           color:var(--muted);border-bottom:1px solid var(--line);background:#fbfbfc;}
@@ -189,8 +198,8 @@ function umlStyle(){
       'label':'data(disp)','shape':'round-rectangle',
       'background-color':'#eaf1fb','border-width':1.5,'border-color':'#3b82f6',
       'color':'#1f2329','text-valign':'center','text-halign':'center',
-      'font-size':'11px','text-wrap':'wrap','text-max-width':'150px',
-      'padding':'8px','width':'label','height':'label'}},
+      'font-size':'14px','text-wrap':'wrap','text-max-width':'180px',
+      'padding':'12px','width':'label','height':'label'}},
     {selector:'node[is_orch = 1]',style:{'background-color':'#fde8e8','border-color':'#dc2626','border-width':2.5}},
     {selector:'node[is_util = 1]',style:{'background-color':'#f1f5f9','border-color':'#94a3b8'}},
     {selector:'node[kind = "interface"]',style:{'background-color':'#eef2ff','border-color':'#6366f1','border-style':'solid'}},
@@ -231,7 +240,7 @@ function disp(n, prefix){
 
 /* Reusable UML graph with expand/collapse.
    edgePred: which edges to include. dir: dagre rankDir. */
-function makeGraph(containerId, edgePred, dir){
+function makeGraph(containerId, edgePred){
   const G = DATA.graph;
   const edges = G.edges.filter(edgePred);
   const usedNodes = new Set();
@@ -290,8 +299,19 @@ function makeGraph(containerId, edgePred, dir){
         e.style('display',(vis.has(e.source().id())&&vis.has(e.target().id()))?'element':'none');
       });
     });
-    cy.layout({name:'dagre',rankDir:dir,nodeSep:30,rankSep:60,
-               fit:true,padding:24,animate:false}).run();
+    // Force-directed layout (cose). The relationships graph is not a
+    // strict hierarchy — most edges are same-level dependencies — so
+    // dagre would compress everything into a wide flat strip and
+    // shrink the labels to dust. cose spreads nodes organically so
+    // each label gets room to breathe.
+    cy.layout({
+      name:'cose',
+      fit:true, padding:30, animate:false,
+      idealEdgeLength: 140,
+      nodeRepulsion: 8000,
+      gravity: 0.4,
+      numIter: 1200,
+    }).run();
     clampZoom(cy);
   }
   cy.on('tap','node',evt=>{
@@ -380,7 +400,7 @@ function makeGraph(containerId, edgePred, dir){
 })();
 
 /* Section 2: all relations, UML */
-makeGraph('cy-rel', e=>true, 'TB');
+makeGraph('cy-rel', e=>true);
 
 /* Section 3: design review */
 (function(){
