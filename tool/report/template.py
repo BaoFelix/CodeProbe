@@ -24,6 +24,9 @@ _HTML = r"""<!DOCTYPE html>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.0/dist/cytoscape.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/layout-base@1.0.2/layout-base.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/cose-base@1.0.3/cose-base.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape-cose-bilkent@4.1.0/cytoscape-cose-bilkent.js"></script>
 <style>
   :root{
     --bg:#f6f7f9;--panel:#fff;--line:#e2e2e2;--text:#1f2329;--muted:#8a8f99;
@@ -147,7 +150,11 @@ _HTML = r"""<!DOCTYPE html>
 </section>
 
 <section>
-  <h2>2. Relationships <span class="hint">All relationships · click a node to reveal what it depends on</span></h2>
+  <h2>2. Relationships
+    <span class="hint">Click a node to expand · drag any node to rearrange · scroll to zoom</span>
+    <button id="rel-reset" style="float:right;font-size:11px;padding:3px 10px;cursor:pointer;
+            border:1px solid var(--line);background:#fff;border-radius:4px;">Reset layout</button>
+  </h2>
   <div class="legend">
     <span><b>△</b> inherits</span><span><b>┄△</b> implements</span>
     <span><b>◆</b> composes</span><span><b>◇</b> aggregates</span>
@@ -165,6 +172,7 @@ _HTML = r"""<!DOCTYPE html>
 <script>
 const DATA = __PAYLOAD__;
 cytoscape.use(cytoscapeDagre);
+cytoscape.use(cytoscapeCoseBilkent);
 
 document.getElementById('meta').textContent =
   [DATA.summary.directory,
@@ -274,19 +282,26 @@ function makeGraph(containerId, edgePred){
   });
 
   // ── Industry-standard pattern (Obsidian / Sourcegraph / GitHub dep
-  // viewers): lay out ALL nodes ONCE, lock positions, then toggling
-  // only changes visibility and pans the camera. Re-running layouts on
-  // every click is what made earlier versions jitter — positions never
-  // changed expectations, the user's spatial memory is preserved.
+  // viewers): lay out ALL nodes ONCE, then toggling only changes
+  // visibility and pans the camera. cose-bilkent is the well-known
+  // anti-overlap successor to plain cose — it spaces nodes so labels
+  // never collide. Nodes are NOT locked: the user can drag any class
+  // wherever they like, and the spatial memory is preserved because
+  // we never re-run a layout after the initial one.
   cy.layout({
-    name:'cose',
-    fit:true, padding:30, animate:false,
-    idealEdgeLength: 120,
-    nodeRepulsion: 6000,
-    gravity: 0.35,
-    numIter: 1500,
+    name:'cose-bilkent',
+    fit:true, padding:40, animate:false, randomize:true,
+    idealEdgeLength: 140,
+    edgeElasticity: 0.45,
+    nodeRepulsion: 9000,
+    nestingFactor: 0.1,
+    gravity: 0.25,
+    gravityRangeCompound: 1.5,
+    numIter: 2500,
+    tile: true,
+    tilingPaddingVertical: 20,
+    tilingPaddingHorizontal: 20,
   }).run();
-  cy.nodes().lock();   // pin every node so nothing moves on toggle
 
   function visibleSet(){
     const vis=new Set(roots);
@@ -330,6 +345,25 @@ function makeGraph(containerId, edgePred){
       refresh(true);
     }
   });
+
+  // Optional reset: re-run the full layout if the user has dragged
+  // nodes into a mess and wants the auto-arrangement back.
+  const resetBtn = document.getElementById('rel-reset');
+  if(resetBtn) resetBtn.onclick = () => {
+    // Layout needs to see every node, so temporarily show all,
+    // re-run, then restore the toggle state.
+    cy.nodes().show();
+    cy.layout({
+      name:'cose-bilkent',
+      fit:true, padding:40, animate:false, randomize:true,
+      idealEdgeLength: 140, nodeRepulsion: 9000,
+      edgeElasticity: 0.45, gravity: 0.25,
+      numIter: 2500, tile: true,
+      tilingPaddingVertical: 20, tilingPaddingHorizontal: 20,
+    }).run();
+    refresh(true);
+  };
+
   refresh(false);
 }
 
