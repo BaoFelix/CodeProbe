@@ -41,7 +41,47 @@ _HTML = r"""<!DOCTYPE html>
   section>h2{margin:0;padding:12px 16px;font-size:14px;font-weight:600;
              background:#f1f3f5;border-bottom:1px solid var(--line);}
   .hint{color:var(--muted);font-size:11px;font-weight:400;margin-left:8px;}
-  .graph{height:500px;}
+  .graph{height:70vh;min-height:520px;}
+
+  /* ── Section 1: indented tree (VSCode style) ────────────── */
+  .tree{padding:14px 18px;font-size:13px;font-family:ui-monospace,Menlo,Consolas,monospace;}
+  .tree .node{margin:0;}
+  .tree details{margin:0;}
+  .tree details>summary{
+    cursor:pointer;padding:3px 4px;border-radius:4px;
+    list-style:none;display:flex;align-items:center;gap:6px;
+    white-space:nowrap;
+  }
+  .tree details>summary::-webkit-details-marker{display:none;}
+  .tree details>summary:hover{background:#f1f5f9;}
+  .tree .twist{display:inline-block;width:14px;color:#94a3b8;
+               text-align:center;flex-shrink:0;}
+  .tree details:not([open])>summary .twist::before{content:'▸';}
+  .tree details[open]>summary .twist::before{content:'▾';}
+  .tree .leaf>summary .twist{visibility:hidden;}
+  .tree .rel{display:inline-block;width:22px;color:#475569;text-align:center;
+             font-family:ui-sans-serif,system-ui,sans-serif;flex-shrink:0;}
+  .tree .rel.depends{color:#94a3b8;}
+  .tree .rel.associates{color:#0891b2;}
+  .tree .rel.aggregates{color:#f59e0b;}
+  .tree .rel.composes{color:#ea580c;}
+  .tree .rel.implements{color:#6366f1;}
+  .tree .rel.inherits{color:#475569;}
+  .tree .rel.dominates{color:#cbd5e1;}
+  .tree .name{font-weight:600;color:#1f2329;}
+  .tree .ster{color:#6366f1;font-style:italic;font-size:11px;margin-left:6px;
+              font-family:ui-sans-serif,system-ui,sans-serif;}
+  .tree .badge{display:inline-block;padding:1px 7px;border-radius:10px;
+               font-size:10px;font-weight:700;color:#fff;margin-left:6px;
+               font-family:ui-sans-serif,system-ui,sans-serif;}
+  .tree .badge.orch{background:#dc2626;}
+  .tree .badge.util{background:#94a3b8;}
+  .tree .badge.impls{background:#0d9488;}
+  .tree .children{
+    border-left:1px dotted #d1d5db;
+    margin-left:11px;            /* aligns the line under the twist */
+    padding-left:14px;
+  }
   .legend{display:flex;flex-wrap:wrap;gap:14px;padding:8px 16px;font-size:11px;
           color:var(--muted);border-bottom:1px solid var(--line);background:#fbfbfc;}
   .legend b{color:var(--text);font-weight:600;}
@@ -94,7 +134,7 @@ _HTML = r"""<!DOCTYPE html>
     <span style="color:#cbd5e1"><b>·····</b> dominates (no direct dependency)</span>
     <span style="color:var(--orch)"><b>■</b> orchestrator</span>
   </div>
-  <div class="graph" id="cy-arch"></div>
+  <div class="tree" id="arch-tree"></div>
 </section>
 
 <section>
@@ -136,10 +176,9 @@ if (DATA.summary.style && DATA.summary.style !== 'oop') {
 
 
 function clampZoom(cy){
-  // Keep the initial view comfortable: tiny graphs shouldn't blow up
-  // to billboard-sized boxes, huge graphs shouldn't shrink to dust.
-  if(cy.zoom() > 1.3){ cy.zoom(1.3); cy.center(); }
-  if(cy.zoom() < 0.25){ cy.zoom(0.25); cy.center(); }
+  // Only guard the dust-floor — let small graphs fill the canvas
+  // (the user explicitly wants the relationships diagram big).
+  if(cy.zoom() < 0.18){ cy.zoom(0.18); cy.center(); }
 }
 
 const STEREO = {interface:'«interface»', external:'«external»', struct:'«struct»'};
@@ -266,86 +305,78 @@ function makeGraph(containerId, edgePred, dir){
   apply();
 }
 
-/* ── Section 1: dominator-forest workflow tree ──────────────
-   Edges are parent→child in the responsibility hierarchy. When a
-   real dependency backs the edge we draw its UML notation; pure
-   dominance (no direct edge) is a dotted grey line. */
+/* ── Section 1: workflow tree as an indented VSCode-style outline.
+   Architecture is fundamentally a tree (dominator forest), so we
+   render it as one instead of forcing a graph layout. The relation
+   kind from parent→child is the leading UML glyph on each row;
+   pure dominance (no direct dependency) is a faint dotted dot. */
 (function(){
+  const root = document.getElementById('arch-tree');
   const A = DATA.arch;
   if(!A || A.nodes.length===0){
-    document.getElementById('cy-arch').innerHTML =
-      '<div class="empty">No workflow hierarchy detected (no internal dependencies between classes).</div>';
+    root.innerHTML = '<div class="empty">No workflow hierarchy detected (no internal dependencies between classes).</div>';
     return;
   }
+  const byId = {};
+  A.nodes.forEach(n => byId[n.id] = n);
   const childrenOf = {};
   A.nodes.forEach(n=>childrenOf[n.id]=[]);
-  A.edges.forEach(e=>{ (childrenOf[e.source]=childrenOf[e.source]||[]).push(e.target); });
+  A.edges.forEach(e=>{
+    (childrenOf[e.source]=childrenOf[e.source]||[]).push({id:e.target, kind:e.kind});
+  });
   const rootIds = A.nodes.filter(n=>n.is_root).map(n=>n.id);
-  const hasChild = id => (childrenOf[id]||[]).length>0;
-  const collapsed = new Set(A.nodes.filter(n=>hasChild(n.id)).map(n=>n.id));
 
-  function archDisp(n, pfx){
-    let txt = pfx + n.label;
-    if(n.impls && n.impls.length) txt += '\n(+' + n.impls.length + ' impls)';
-    return txt;
+  // UML glyphs reusable as inline text.
+  const GLYPH = {
+    inherits:    '△',
+    implements:  '┄△',
+    composes:    '◆',
+    aggregates:  '◇',
+    associates:  '→',
+    depends:     '┄→',
+    dominates:   '·····',
+  };
+
+  function row(node, kindFromParent){
+    const n = byId[node];
+    const glyph = kindFromParent ? GLYPH[kindFromParent] || '·' : '';
+    const relCls = kindFromParent ? ' ' + kindFromParent : '';
+    let summary = '';
+    summary += '<span class="twist"></span>';
+    summary += `<span class="rel${relCls}">${escapeHtml(glyph)}</span>`;
+    summary += `<span class="name">${escapeHtml(n.label)}</span>`;
+    if(n.kind === 'interface') summary += '<span class="ster">«interface»</span>';
+    if(n.kind === 'struct')    summary += '<span class="ster">«struct»</span>';
+    if(n.is_orch) summary += '<span class="badge orch">orchestrator</span>';
+    if(n.is_util) summary += '<span class="badge util">utility</span>';
+    if(n.impls && n.impls.length) summary += `<span class="badge impls">+${n.impls.length} impls</span>`;
+    return summary;
   }
 
-  const cy = cytoscape({
-    container: document.getElementById('cy-arch'),
-    elements:{
-      nodes: A.nodes.map(n=>({data:{...n, disp:archDisp(n,'')}})),
-      edges: A.edges.map((e,i)=>({data:{id:'a'+i,source:e.source,target:e.target,
-                                        primary:e.kind, elabel:e.kind==='dominates'?'':e.kind}})),
-    },
-    style: umlStyle().concat([
-      {selector:'edge[primary="dominates"]',style:{
-        'line-style':'dotted','line-color':'#cbd5e1','width':1.2,
-        'target-arrow-shape':'none','source-arrow-shape':'none'}},
-    ]),
-    wheelSensitivity:0.2,
-  });
-
-  function visibleSet(){
-    const vis=new Set(rootIds);
-    let changed=true;
-    while(changed){
-      changed=false;
-      for(const id of [...vis]){
-        if(!collapsed.has(id)){
-          for(const c of (childrenOf[id]||[])){ if(!vis.has(c)){vis.add(c);changed=true;} }
-        }
+  function build(id, kindFromParent, depth){
+    const kids = childrenOf[id] || [];
+    const leaf = kids.length === 0;
+    const isRoot = depth === 0;
+    const det = document.createElement('details');
+    det.className = 'node' + (leaf ? ' leaf' : '');
+    if(isRoot) det.open = true;       // root expanded, the rest collapsed
+    const sum = document.createElement('summary');
+    sum.innerHTML = row(id, kindFromParent);
+    det.appendChild(sum);
+    if(!leaf){
+      const wrap = document.createElement('div');
+      wrap.className = 'children';
+      for(const k of kids){
+        wrap.appendChild(build(k.id, k.kind, depth + 1));
       }
+      det.appendChild(wrap);
     }
-    return vis;
+    return det;
   }
-  function apply(){
-    const vis=visibleSet();
-    cy.batch(()=>{
-      cy.nodes().forEach(n=>{
-        const id=n.id();
-        n.style('display',vis.has(id)?'element':'none');
-        const pfx = hasChild(id) ? (collapsed.has(id)?'[+] ':'[−] ') : '';
-        n.data('disp', archDisp(n.data(), pfx));
-      });
-      cy.edges().forEach(e=>{
-        e.style('display',(vis.has(e.source().id())&&vis.has(e.target().id()))?'element':'none');
-      });
-    });
-    cy.layout({name:'dagre',rankDir:'TB',nodeSep:26,rankSep:56,
-               fit:true,padding:24,animate:false}).run();
-    clampZoom(cy);
+
+  for(const r of rootIds){
+    root.appendChild(build(r, null, 0));
   }
-  function collapseSubtree(id){
-    collapsed.add(id);
-    for(const c of (childrenOf[id]||[])) collapseSubtree(c);
-  }
-  cy.on('tap','node',evt=>{
-    const id=evt.target.id();
-    if(!hasChild(id)) return;
-    if(collapsed.has(id)) collapsed.delete(id); else collapseSubtree(id);
-    apply();
-  });
-  apply();
 })();
 
 /* Section 2: all relations, UML */
