@@ -17,7 +17,7 @@ def render(payload):
 
 
 _HTML = r"""<!DOCTYPE html>
-<html lang="zh">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>CodeProbe</title>
@@ -84,29 +84,29 @@ _HTML = r"""<!DOCTYPE html>
 </header>
 
 <section>
-  <h2>1. 架构分析 <span class="hint">工作流层级(支配树)· 点 [+] 节点展开下一层,再点收起</span></h2>
+  <h2>1. Architecture <span class="hint">Workflow hierarchy (dominator tree) · click [+] nodes to expand, click again to collapse</span></h2>
   <div class="legend">
-    <span><b>◆</b> 组合</span><span><b>◇</b> 聚合</span><span><b>→</b> 关联</span>
-    <span><b>△</b> 继承</span><span><b>┄△</b> 实现</span>
-    <span style="color:#cbd5e1"><b>·····</b> 管辖(无直接依赖)</span>
+    <span><b>◆</b> composes</span><span><b>◇</b> aggregates</span><span><b>→</b> associates</span>
+    <span><b>△</b> inherits</span><span><b>┄△</b> implements</span>
+    <span style="color:#cbd5e1"><b>·····</b> dominates (no direct dependency)</span>
     <span style="color:var(--orch)"><b>■</b> orchestrator</span>
   </div>
   <div class="graph" id="cy-arch"></div>
 </section>
 
 <section>
-  <h2>2. 详细关系 <span class="hint">全部关系 · 点节点展开它依赖的类</span></h2>
+  <h2>2. Relationships <span class="hint">All relationships · click a node to reveal what it depends on</span></h2>
   <div class="legend">
-    <span><b>△</b> 继承</span><span><b>┄△</b> 实现</span>
-    <span><b>◆</b> 组合</span><span><b>◇</b> 聚合</span>
-    <span><b>→</b> 关联</span><span><b>┄→</b> 依赖</span>
-    <span style="color:var(--util)"><b>┄ ┄</b> 外部类型</span>
+    <span><b>△</b> inherits</span><span><b>┄△</b> implements</span>
+    <span><b>◆</b> composes</span><span><b>◇</b> aggregates</span>
+    <span><b>→</b> associates</span><span><b>┄→</b> depends</span>
+    <span style="color:var(--util)"><b>┄ ┄</b> external type</span>
   </div>
   <div class="graph" id="cy-rel"></div>
 </section>
 
 <section>
-  <h2>3. 设计审视 <span class="hint">默认收起,点击标题展开详情</span></h2>
+  <h2>3. Design Review <span class="hint">Collapsed by default · click a title to expand</span></h2>
   <div class="review" id="review"></div>
 </section>
 
@@ -181,7 +181,7 @@ function makeGraph(containerId, edgePred, dir){
   const nodes = G.nodes.filter(n=>usedNodes.has(n.id));
 
   if(nodes.length===0){
-    document.getElementById(containerId).innerHTML='<div class="empty">此视图没有可显示的关系。</div>';
+    document.getElementById(containerId).innerHTML='<div class="empty">No relationships to display in this view.</div>';
     return;
   }
 
@@ -252,7 +252,7 @@ function makeGraph(containerId, edgePred, dir){
   const A = DATA.arch;
   if(!A || A.nodes.length===0){
     document.getElementById('cy-arch').innerHTML =
-      '<div class="empty">没有检测到工作流层级(类之间无内部依赖)。</div>';
+      '<div class="empty">No workflow hierarchy detected (no internal dependencies between classes).</div>';
     return;
   }
   const childrenOf = {};
@@ -264,7 +264,7 @@ function makeGraph(containerId, edgePred, dir){
 
   function archDisp(n, pfx){
     let txt = pfx + n.label;
-    if(n.impls && n.impls.length) txt += '\n(+' + n.impls.length + ' 实现)';
+    if(n.impls && n.impls.length) txt += '\n(+' + n.impls.length + ' impls)';
     return txt;
   }
 
@@ -334,16 +334,16 @@ makeGraph('cy-rel', e=>true, 'LR');
   const R=DATA.review||{high_level:[],class_level:[]};
   let html='';
 
-  html+='<h3>高层设计问题</h3>';
+  html+='<h3>High-level design issues</h3>';
   if((R.high_level||[]).length){
     for(const p of R.high_level){
       const pri=p.priority==='high'?'high':p.priority==='medium'?'med':p.priority==='low'?'low':'info';
       html+=`<details class="item"><summary><span class="pill ${pri}">${esc(p.priority||'info')}</span>`;
       html+=`<span>${esc(p.title)}</span></summary><div class="content">${renderKV(p.details)}</div></details>`;
     }
-  } else html+='<div class="empty">暂无高层设计问题(运行 analyze 生成)。</div>';
+  } else html+='<div class="empty">No high-level issues yet. Run <code>analyze</code> to generate.</div>';
 
-  html+='<h3>类 / 函数级问题</h3>';
+  html+='<h3>Class- / function-level issues</h3>';
   if((R.class_level||[]).length){
     for(const c of R.class_level){
       html+=`<details class="item"><summary><span>${esc(c.short)}</span>`;
@@ -355,7 +355,7 @@ makeGraph('cy-rel', e=>true, 'LR');
       }
       html+=`</div></details>`;
     }
-  } else html+='<div class="empty">暂无类/函数级问题。</div>';
+  } else html+='<div class="empty">No class- or function-level issues found.</div>';
 
   root.innerHTML=html;
   function renderKV(details){
