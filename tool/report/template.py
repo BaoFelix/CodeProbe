@@ -273,6 +273,21 @@ function makeGraph(containerId, edgePred){
     wheelSensitivity:0.2,
   });
 
+  // ── Industry-standard pattern (Obsidian / Sourcegraph / GitHub dep
+  // viewers): lay out ALL nodes ONCE, lock positions, then toggling
+  // only changes visibility and pans the camera. Re-running layouts on
+  // every click is what made earlier versions jitter — positions never
+  // changed expectations, the user's spatial memory is preserved.
+  cy.layout({
+    name:'cose',
+    fit:true, padding:30, animate:false,
+    idealEdgeLength: 120,
+    nodeRepulsion: 6000,
+    gravity: 0.35,
+    numIter: 1500,
+  }).run();
+  cy.nodes().lock();   // pin every node so nothing moves on toggle
+
   function visibleSet(){
     const vis=new Set(roots);
     let changed=true;
@@ -286,44 +301,36 @@ function makeGraph(containerId, edgePred){
     }
     return vis;
   }
-  function apply(){
+
+  function refresh(animate){
     const vis=visibleSet();
     cy.batch(()=>{
       cy.nodes().forEach(n=>{
         const id=n.id();
-        // Use Cytoscape's proper hide/show: setting 'display' via
-        // style() is fragile against re-running layouts (cose pulls
-        // hidden nodes back into its force calculation).
         if(vis.has(id)) n.show(); else n.hide();
         const pfx = hasOut(id) ? (expanded.has(id)?'[−] ':'[+] ') : '';
         n.data('disp', disp(n.data(), pfx));
       });
-      // Hiding a node auto-hides its connected edges in Cytoscape;
-      // no edge loop needed.
     });
-    // Lay out only the currently visible elements. cose scrambles
-    // every node it sees, so handing it the hidden ones would
-    // recompute their positions and re-introduce them on the next
-    // tap. randomize:false keeps already-placed nodes where they are.
-    cy.elements(':visible').layout({
-      name:'cose',
-      fit:true, padding:30, animate:false, randomize:false,
-      idealEdgeLength: 140,
-      nodeRepulsion: 8000,
-      gravity: 0.4,
-      numIter: 600,
-    }).run();
+    const visEles = cy.elements(':visible');
+    if(visEles.length===0) return;
+    if(animate){
+      cy.animate({fit:{eles:visEles, padding:40}}, {duration:350, easing:'ease-out'});
+    } else {
+      cy.fit(visEles, 40);
+    }
     clampZoom(cy);
   }
+
   cy.on('tap','node',evt=>{
     const id=evt.target.id();
     cy.nodes().removeClass('hl'); evt.target.addClass('hl');
     if(hasOut(id)){
       if(expanded.has(id)) expanded.delete(id); else expanded.add(id);
-      apply();
+      refresh(true);
     }
   });
-  apply();
+  refresh(false);
 }
 
 /* ── Section 1: workflow tree as an indented VSCode-style outline.
