@@ -41,11 +41,6 @@ def main():
             print("  path can be a directory or a single .hxx/.h file")
             return
         pipeline.run_full_analysis(args[1], from_step=from_step)
-    elif cmd == 'focus':
-        if len(args) < 2:
-            print("  Usage: python run.py focus <class_name>")
-            return
-        pipeline.run_focus(args[1])
     elif cmd == 'status':
         pipeline.show_status()
     elif cmd == 'report':
@@ -66,26 +61,23 @@ Usage: python run.py <command> [options]
 
 Commands:
   init                    Initialize project (create DB tables)
-  analyze <path>          Full analysis pipeline (scan → resp → design)
+  analyze <path>          Full pipeline (scan → design review)
                           <path> = directory or .hxx/.sch file
-                          Supported formats: .hxx, .sch, .cxx
-  focus <class_name>      Deep analysis of a single class
+                          Supported formats: .hxx, .h, .hpp, .cxx, .cpp, .sch
   status                  Show analysis progress dashboard
-  report                  Generate HTML report
+  report                  Generate the interactive HTML report
 
 Options:
-  --from=STEP             Re-run from step: scan, resp, or design
+  --from=STEP             Re-run from step: scan or review
 
 Workflow:
-  python run.py init                            # first time setup
-  python run.py analyze test_src/               # full pipeline
-  python run.py analyze test_src/ --from=resp   # re-run from responsibility step
-  python run.py focus Vehicle                   # deep-dive into one class
-  python run.py status                          # check progress
-  python run.py report                          # generate HTML report
+  python run.py init                              # first time setup
+  python run.py analyze test_src/                 # scan + design review
+  python run.py analyze test_src/ --from=review   # re-run the design review
+  python run.py report                            # generate HTML report
 
-Requires LLM API access. Configure .env (see .env.example).
-Supports interrupt & resume — re-run analyze to continue from last step.
+The design review step needs LLM API access — configure .env
+(see .env.example). Scanning and the report work without it.
 """)
 
 

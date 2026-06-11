@@ -1,0 +1,83 @@
+"""
+model.py — the two value objects everything else speaks in.
+
+Entity        a named thing in the code: namespace / class / struct /
+              interface / method / field. Identified by qualified_name
+              ("UGS::SimulationPost::GraphCreation::CreateGraph").
+Relationship  one piece of evidence that A uses B, with a kind, a
+              source location, and the exact source line as proof.
+
+This file is THE single source of truth for the 6 relationship kinds
+and their strength levels (LEVEL_OF). If you ever add a kind, do it
+here and only here — parser, graph analysis, DB and report all import
+from this module.
+
+Pure data containers: no parsing logic, no DB knowledge. The parser
+produces them; db.py persists them; workflow/report consume them.
+"""
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+import json
+
+
+# ── kinds (string enums — keep simple, no Enum class) ──────────────
+ENTITY_KINDS = {'class', 'struct', 'interface', 'enum',
+                'method', 'field', 'namespace'}
+
+# weak → strong (matches what reader.py used: Lv-0..Lv-5)
+# `depends` is the catch-all "uses another entity's code" edge,
+# covering both signature-level use and body-level calls. Future
+# body-call extraction adds attrs={'via': 'body_call', ...} on the
+# same edge kind rather than introducing a new one.
+RELATION_KINDS = ('depends',      # Lv-0  signature param/return OR body call
+                  'associates',   # Lv-1  raw pointer / shared_ptr field
+                  'implements',   # Lv-2  inherits an interface (I-prefixed / pure virtual)
+                  'aggregates',   # Lv-3  container of pointers (vector<X*>)
+                  'composes',     # Lv-4  value field / unique_ptr field
+                  'inherits')     # Lv-5  class : public Base
+
+LEVEL_OF = {'depends': 0, 'associates': 1, 'implements': 2,
+            'aggregates': 3, 'composes': 4, 'inherits': 5}
+
+
+@dataclass
+class Entity:
+    kind: str               # one of ENTITY_KINDS
+    name: str               # short name, e.g. 'Plot'
+    qualified_name: str     # fully qualified, e.g. 'UGS::Plot' or 'UGS::Plot::draw'
+    file_path: str
+    start_line: int
+    end_line: int
+    parent_qname: Optional[str] = None   # containing entity's qualified_name
+    signature: Optional[str] = None      # method full sig / field type / None
+    attrs: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.kind not in ENTITY_KINDS:
+            raise ValueError(f"bad entity kind: {self.kind}")
+
+    def attrs_json(self) -> str:
+        return json.dumps(self.attrs, sort_keys=True)
+
+
+@dataclass
+class Relationship:
+    source_qname: str             # qualified_name of source entity
+    target_name: str              # always populated — even when target is external
+    kind: str                     # one of RELATION_KINDS
+    evidence_file: str
+    evidence_line: int
+    evidence_text: str = ''       # original source line — used directly in prompts
+    target_qname: Optional[str] = None   # filled in resolve pass when target found
+    attrs: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.kind not in RELATION_KINDS:
+            raise ValueError(f"bad relation kind: {self.kind}")
+
+    @property
+    def level(self) -> int:
+        return LEVEL_OF[self.kind]
+
+    def attrs_json(self) -> str:
+        return json.dumps(self.attrs, sort_keys=True)

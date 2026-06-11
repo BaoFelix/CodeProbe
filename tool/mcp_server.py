@@ -21,12 +21,12 @@ try:
 except ImportError:
     MCP_AVAILABLE = False
 
-from .config import DB_PATH, SOURCE_ROOT, DEFAULT_MODULE, PROJECT_ROOT, OUTPUTS_DIR
+from .config import DB_PATH, SOURCE_ROOT, OUTPUTS_DIR
 from .db import DBManager
-from .reader import FileReader
-from .prompts import PromptBuilder
+from .source_io import SourceReader
 from .llm import LLMClient
-from .agents import ScannerAgent, ResponsibilityAgent
+from .agents import ScannerAgent
+from .design_critic import DesignCriticAgent
 
 
 def create_mcp_server():
@@ -51,24 +51,11 @@ def create_mcp_server():
 
     # Shared resources (used by all tools)
     db = DBManager(DB_PATH)
-    reader = FileReader(SOURCE_ROOT)
-    llm = LLMClient(backend="api")  # MCP mode uses API backend
+    reader = SourceReader(SOURCE_ROOT, db=db)
+    llm = LLMClient(cache=db)
 
-    # Load skills (align with pipeline.py)
-    universal_skills = {}
-    skills_dir = PROJECT_ROOT / "skills" / "universal"
-    if skills_dir.exists():
-        for f in sorted(skills_dir.glob("*.md")):
-            try:
-                universal_skills[f.stem] = f.read_text(encoding='utf-8')
-            except OSError:
-                pass
-    prompts = PromptBuilder(
-        universal_skills=universal_skills,
-    )
-
-    scanner = ScannerAgent(llm=llm, db=db, reader=reader, prompts=prompts)
-    resp_agent = ResponsibilityAgent(llm=llm, db=db, reader=reader, prompts=prompts)
+    scanner = ScannerAgent(llm=llm, db=db, reader=reader)
+    critic = DesignCriticAgent(llm=llm, db=db, reader=reader)
 
     # ─── Tool definitions ────────────────────────────────────────────
 
@@ -83,25 +70,24 @@ def create_mcp_server():
         return f"Scan complete, found and registered {count} C++ classes"
 
     @mcp.tool()
-    def analyze_class(class_name: str) -> str:
+    def design_review() -> str:
         """
-        Analyze a C++ class's responsibilities and design issues.
-        Class must first be registered to database via scan_source or register.
-        Returns responsibility analysis results.
+        Run the holistic design review (two-pass LLM analysis) over the
+        scanned codebase. Requires scan_source to have been run first.
+        Returns a summary of recommendations.
         """
-        result = resp_agent.run(class_name)
-        if not result:
-            return f"Analysis failed: {class_name}. Confirm the class is registered in database."
-
-        resp = db.get_responsibility(class_name)
-        if resp:
-            return (
-                f"Analysis complete: {class_name}\n"
-                f"Actual: {resp['actual_responsibilities']}\n"
-                f"Ideal: {resp['ideal_responsibility']}\n"
-                f"SRP violations: {resp['srp_violations']}"
-            )
-        return f"Analysis complete: {class_name}"
+        if not critic.run():
+            return "Design review failed. Has scan_source been run?"
+        module = db.get_design_module()
+        if module and module['parsed_json']:
+            import json as _json
+            parsed = _json.loads(module['parsed_json'])
+            recs = parsed.get('recommendations', [])
+            lines = [f"Design review complete: {len(recs)} recommendations"]
+            for r in recs[:8]:
+                lines.append(f"  [{r.get('priority','?')}] {r.get('title') or r.get('target','')}")
+            return "\n".join(lines)
+        return "Design review complete (no recommendations parsed)."
 
     @mcp.tool()
     def get_status() -> str:
@@ -109,28 +95,29 @@ def create_mcp_server():
         Get current analysis progress: total classes, analyzed, pending.
         """
         stats = db.get_stats()
-        tasks = db.get_all_tasks()
+        tasks = db.get_classes()
 
         if not stats or stats['total'] == 0:
             return "Database is empty. Run scan_source first."
 
+        orchestrator = (db.get_module_info() or {}).get('orchestrator')
         lines = [
             f"Total classes: {stats['total']}",
-            f"Analyzed: {stats['analyzed']}",
-            f"Pending: {stats['pending']}",
+            f"Critic subtrees analyzed: {stats['analyzed']}",
         ]
         lines.append("\nClass list:")
         for t in tasks:
-            orch = ' [orchestrator]' if t['is_orchestrator'] else ''
-            lines.append(f"  {t['class_name']}{orch}")
+            qn = t['qualified_name']
+            orch = ' [orchestrator]' if qn == orchestrator else ''
+            lines.append(f"  {qn}{orch}")
         return "\n".join(lines)
 
     @mcp.tool()
     def query_db(sql: str) -> str:
         """
         Execute read-only SQL query on refactor database.
-        Only SELECT statements allowed. Queryable tables: classes, dependencies, module_info,
-        responsibility_analysis, design_proposals.
+        Only SELECT statements allowed. Queryable tables: entities, relationships,
+        module_info, design_critic_subtree, design_critic_module.
         """
         sql_stripped = sql.strip().upper()
         if not sql_stripped.startswith("SELECT"):
@@ -158,26 +145,6 @@ def create_mcp_server():
             return f"SQL error: {e}"
 
     @mcp.tool()
-    def register_class(
-        class_name: str,
-        header_path: str = "",
-        impl_path: str = ""
-    ) -> str:
-        """
-        Manually register a C++ class to the database.
-        class_name: class name (required)
-        header_path: header file path (optional)
-        impl_path: implementation file path (optional)
-        """
-        db.register_class(
-            class_name,
-            header_path=header_path or None,
-            impl_path=impl_path or None,
-            module=DEFAULT_MODULE
-        )
-        return f"Registered: {class_name}"
-
-    @mcp.tool()
     def generate_report() -> str:
         """Generate HTML diagnostic report from analysis results in database.
         Returns path to generated report.html file."""
@@ -194,6 +161,6 @@ def run_mcp_server():
     server = create_mcp_server()
     if server:
         print("  ✓ MCP Server starting...")
-        print("  Tools: scan_source, analyze_class, get_status, query_db, register_class, generate_report")
+        print("  Tools: scan_source, design_review, get_status, query_db, generate_report")
         print("  Waiting for AI Agent connection...")
         server.run()

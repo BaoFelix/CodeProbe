@@ -1,82 +1,141 @@
 # CodeProbe
 
-AI-powered C++ design diagnostic tool. Analyzes class design quality using the Seven Sins framework and proposes refactoring plans.
+AI-powered C++ architecture diagnostic tool. Point it at a C++ codebase —
+even a partial one — and it builds an accurate entity-relationship graph
+with tree-sitter, derives the architecture (orchestrator, utilities,
+workflow hierarchy) with graph algorithms, has an LLM audit the design
+top-down, and ships everything as one interactive HTML report.
 
 ## Features
 
-- **Multi-Agent pipeline**: ScannerAgent → ResponsibilityAgent → DesignAgent
-- **Seven Sins diagnosis**: God Class, Inheritance Hell, Abstraction Absence, Feature Envy, Circular Entanglement, Hidden State, Knowledge Leakage
-- **Three-layer HTML report**: Module Workflow → Dependency Health → Pain Points & Proposals
-- **Incremental analysis**: interrupt & resume, selective re-run with `--from=STEP`
-- **Multiple LLM backends**: OpenAI-compatible APIs, Anthropic Claude
+- **Accurate parsing via tree-sitter** — no compiler needed; partial /
+  non-compilable code is fine. Hardened on real projects (spdlog, OpenCASCADE,
+  Eigen): export macros, typedef aliases, templated bases, out-of-line
+  methods, forward declarations all handled.
+- **Six UML relationship kinds** — depends / associates / implements /
+  aggregates / composes / inherits, each backed by evidence lines from the
+  actual source.
+- **Architecture derivation** — orchestrator scoring, utility detection,
+  dominator-tree workflow hierarchy, SCC cycle condensation, abstraction
+  folding, architecture style detection (OOP / mixed / CRTP with warning).
+- **Two-pass LLM design review** — per-subtree analysis then module-level
+  synthesis; methodology is user-overridable via `skills/design_critic.md`.
+- **Interactive HTML report** — one self-contained file: workflow tree,
+  draggable UML relationship diagram (layout once, camera animates), and
+  the design review. No server needed.
+- **Fast re-runs** — parse cache (~22× on re-scan), multiprocess first
+  scan, prompt-hash LLM cache (re-running an unchanged review is free).
+- **Multiple LLM backends** — OpenAI-compatible APIs (GitHub Models etc.)
+  and Anthropic Claude. Scanning and reporting work fully offline.
 
 ## Quick Start
 
 ```bash
-# 1. Setup
-cp .env.example .env        # Edit .env with your API key
-python run.py init           # Initialize database
+# 0. Install dependencies
+pip install -r requirements.txt
 
-# 2. Analyze — provide path to your C++/schema source directory
-python run.py analyze test_src/
+# 1. Setup
+cp .env.example .env         # add your LLM API key (only needed for the design review)
+python run.py init           # initialize the database
+
+# 2. Analyze — point at your C++ source directory
+python run.py analyze path/to/your/cpp/sources
 
 # 3. Report
-python run.py report         # Generate HTML report → outputs/report.html
+python run.py report         # → outputs/report.html, open in any browser
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `init` | Reset database |
-| `analyze <path>` | Full pipeline: scan → responsibility → design. `<path>` is a directory containing C++ source files, or a single header file. |
-| `focus <class>` | Deep analysis of a single class |
-| `status` | Progress dashboard |
-| `report` | Generate HTML diagnostic report |
+| `init` | Initialize / reset the database |
+| `analyze <path>` | Full pipeline: scan → design review. `<path>` is a directory or a single header file |
+| `status` | Show analysis progress dashboard |
+| `report` | Generate the interactive HTML report |
+| `mcp-server` | Run as an MCP server so AI agents can drive the tool (`pip install mcp`) |
 
 ### Options
 
-- `--from=STEP` — Re-run from a specific step (`scan`, `resp`, or `design`)
+- `--from=STEP` — re-run from a specific step: `scan` or `review`.
+  E.g. `python run.py analyze src/ --from=review` re-runs only the LLM
+  review (cheap thanks to the LLM cache).
 
 ### Supported file formats
 
-| Extension | Type |
-|-----------|------|
-| `.hxx` | C++ header |
-| `.sch` | Schema header (treated as C++ header) |
-| `.cxx` | C++ implementation |
+`.hxx` `.h` `.hpp` (headers) · `.cxx` `.cpp` (implementations) · `.sch`
+(schema DSL, minimal regex parser). Vendored/bundled/external directories
+are excluded automatically.
 
-The scanner reads `.hxx` and `.sch` files to discover class definitions, then looks for matching `.cxx` files for implementation details.
-
-## Architecture
+## How it works
 
 ```
-Pipeline (coordinator)
-  ├── ScannerAgent    → reads C++/schema files, extracts class structure → DB
-  ├── ResponsibilityAgent → per-class sin diagnosis via LLM → DB
-  └── DesignAgent     → refactoring proposal via LLM → DB
-
-Report (three-layer HTML)
-  ├── Layer 1: Module Workflow (seed clustering + dependency absorption)
-  ├── Layer 2: Dependency Health (6-level pyramid diagnosis)
-  └── Layer 3: Pain Points & Proposals (sin-based, grouped by class)
+ C++ sources (partial is fine)
+      │
+      ▼
+ ts_parser.py      tree-sitter → entities + 6 relationship kinds
+      │
+      ▼
+ db.py             SQLite = shared memory between all stages
+      │
+      ├────────────────────┐
+      ▼                    ▼
+ workflow.py          design_critic.py
+ graph analysis       two-pass LLM review
+      │                    │
+      └─────────┬──────────┘
+                ▼
+ report/        one self-contained interactive HTML
 ```
+
+Full design rationale — including the ten key design decisions and the
+trade-offs behind them — is in [`architecture.md`](architecture.md).
 
 ## Configuration
 
-Copy `.env.example` to `.env` and set your LLM API credentials:
+Copy `.env.example` to `.env` and set your LLM credentials. Two examples:
 
 ```bash
-# OpenAI-compatible (GitHub Models, etc.)
+# OpenAI-compatible (GitHub Models — free tier available)
 LLM_API_FORMAT=openai
 LLM_API_URL=https://models.inference.ai.azure.com
-LLM_API_KEY=your-token
+LLM_API_KEY=your-github-token
 LLM_MODEL=gpt-4o
 
+# Anthropic Claude
+LLM_API_FORMAT=anthropic
+LLM_API_URL=https://api.anthropic.com
+LLM_API_KEY=sk-ant-...
+LLM_MODEL=claude-sonnet-4-20250514
 ```
+
+Useful environment switches:
+
+- `LLM_FALLBACK_MODELS` — comma-separated fallback chain used automatically
+  on 429 rate limits.
+- `LLM_NO_CACHE=1` — bypass the LLM response cache (useful while tuning
+  prompts).
+
+The LLM key is only needed for the design review step; scanning,
+architecture derivation, and the HTML report all run offline.
+
+## Customizing the design review
+
+Drop a `skills/design_critic.md` file in the project root to replace the
+built-in review methodology with your own prompt playbook — no code
+changes required.
 
 ## Requirements
 
 - Python 3.10+
-- No external dependencies for core functionality (uses stdlib `urllib`)
-- Optional: `pip install mcp` for MCP server mode
+- `tree-sitter`, `tree-sitter-cpp`, `networkx` (see `requirements.txt`)
+- Optional: `mcp` for MCP server mode
+- LLM calls use stdlib `urllib` — no HTTP client dependency
+
+## Documentation
+
+- [`architecture.md`](architecture.md) — presenter's guide to the whole
+  system: data flow, module map, the six relationships, ten design
+  decisions with the rejected alternatives, performance numbers, known limits.
+- [`LearningLog.md`](LearningLog.md) — lessons learned while building it
+  (in Chinese).

@@ -1,0 +1,7 @@
+# Core
+tree-sitter>=0.23
+tree-sitter-cpp>=0.23
+networkx>=3.0
+
+# Optional: MCP server mode (python run.py mcp-server)
+# mcp
