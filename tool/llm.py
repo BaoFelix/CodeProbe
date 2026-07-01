@@ -26,11 +26,31 @@ import os
 import time
 import urllib.request
 import urllib.error
+from dataclasses import dataclass
 
 from .config import (
     LLM_API_FORMAT, LLM_API_URL, LLM_API_KEY, LLM_MODEL,
     LLM_FALLBACK_MODELS, OUTPUTS_DIR
 )
+
+
+# ── Tool-use contract (provider-agnostic) ───────────────────────────
+# The Host's agent loop speaks ONLY these shapes. Every OpenAI/Anthropic
+# wire-format difference is hidden inside LLMClient below, so the Host
+# never learns which provider is configured.
+
+@dataclass
+class ToolCall:
+    id: str            # provider's call id — needed to reply with its result
+    name: str          # tool name the model wants to run
+    args: dict         # parsed arguments
+
+
+@dataclass
+class LLMResponse:
+    text: str                    # assistant's text (may be empty)
+    tool_calls: list             # list[ToolCall]; empty ⇒ this is the answer
+    assistant_message: dict      # raw assistant msg to append back to history
 
 
 class LLMClient:
@@ -110,6 +130,124 @@ class LLMClient:
             except Exception:
                 pass
         return response
+
+    # ─── Tool use (the agent loop's engine) ─────────────────────
+    #
+    # generate() is single-shot text. The agent loop needs the model to
+    # be able to REQUEST a tool call and then see its result. That is a
+    # stateful, multi-turn exchange, so — unlike generate() — it is NOT
+    # cached (each step's messages differ).
+    #
+    # Contract:
+    #   generate_with_tools(messages, tools, system_prompt) -> LLMResponse
+    #   tool_result_message(tool_call, result_text)         -> dict
+    # The Host appends resp.assistant_message, runs each tool, and appends
+    # tool_result_message(...) for each — all provider-native dicts it
+    # never has to inspect.
+
+    def generate_with_tools(self, messages, tools, system_prompt=""):
+        """One turn of the loop. `messages` is the running provider-native
+        history; `tools` is the schema list from tools.tool_schemas().
+        Returns an LLMResponse (text + tool_calls + the assistant message
+        to append)."""
+        if self.api_format == "anthropic":
+            return self._tools_call_anthropic(messages, tools, system_prompt)
+        return self._tools_call_openai(messages, tools, system_prompt)
+
+    def tool_result_message(self, tool_call, result_text):
+        """Build the provider-native message that reports one tool's result
+        back to the model."""
+        if self.api_format == "anthropic":
+            return {"role": "user",
+                    "content": [{"type": "tool_result",
+                                 "tool_use_id": tool_call.id,
+                                 "content": result_text}]}
+        return {"role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": result_text}
+
+    @staticmethod
+    def _parse_args(raw):
+        """Tool arguments arrive as a JSON string (OpenAI) or a dict
+        (Anthropic). Normalize to a dict; never raise on junk."""
+        if isinstance(raw, dict):
+            return raw
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    def _post(self, url, body, headers):
+        """POST json → parsed json. Returns (data, error_str)."""
+        req = urllib.request.Request(
+            url, data=json.dumps(body).encode("utf-8"),
+            headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                return json.loads(resp.read().decode("utf-8")), None
+        except urllib.error.HTTPError as e:
+            return None, f"HTTP {e.code}: {e.read().decode('utf-8','replace')[:200]}"
+        except urllib.error.URLError as e:
+            return None, f"network: {e.reason}"
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            return None, f"parse: {e}"
+
+    def _tools_call_openai(self, messages, tools, system_prompt):
+        msgs = list(messages)
+        if system_prompt:
+            msgs = [{"role": "system", "content": system_prompt}] + msgs
+        body = {
+            "model": self.model,
+            "messages": msgs,
+            "tools": [{"type": "function", "function": t} for t in tools],
+            "tool_choice": "auto",
+            "temperature": 0.3,
+            "max_tokens": 4096,
+        }
+        url = self.api_url.rstrip("/") + "/chat/completions"
+        headers = {"Content-Type": "application/json",
+                   "Authorization": f"Bearer {self.api_key}"}
+        data, err = self._post(url, body, headers)
+        if err:
+            return LLMResponse(text=f"[LLM error: {err}]", tool_calls=[],
+                               assistant_message={"role": "assistant",
+                                                  "content": ""})
+        msg = data["choices"][0]["message"]
+        calls = [ToolCall(id=c["id"], name=c["function"]["name"],
+                          args=self._parse_args(c["function"].get("arguments")))
+                 for c in (msg.get("tool_calls") or [])]
+        return LLMResponse(text=msg.get("content") or "",
+                           tool_calls=calls, assistant_message=msg)
+
+    def _tools_call_anthropic(self, messages, tools, system_prompt):
+        body = {
+            "model": self.model,
+            "max_tokens": 4096,
+            "messages": list(messages),
+            "tools": [{"name": t["name"], "description": t["description"],
+                       "input_schema": t["parameters"]} for t in tools],
+        }
+        if system_prompt:
+            body["system"] = system_prompt
+        url = self.api_url.rstrip("/") + "/v1/messages"
+        headers = {"Content-Type": "application/json",
+                   "x-api-key": self.api_key,
+                   "anthropic-version": "2023-06-01"}
+        data, err = self._post(url, body, headers)
+        if err:
+            return LLMResponse(text=f"[LLM error: {err}]", tool_calls=[],
+                               assistant_message={"role": "assistant",
+                                                  "content": ""})
+        blocks = data.get("content", [])
+        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        calls = [ToolCall(id=b["id"], name=b["name"],
+                          args=self._parse_args(b.get("input")))
+                 for b in blocks if b.get("type") == "tool_use"]
+        return LLMResponse(text=text, tool_calls=calls,
+                           assistant_message={"role": "assistant",
+                                              "content": blocks})
 
     # ─── OpenAI-Compatible Backend ──────────────────────────────
 
