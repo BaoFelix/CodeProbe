@@ -6,7 +6,9 @@
 > natural language, decides a strategy, and uses the engine's accurate facts
 > to answer what the user actually wants — not always a fixed report.
 >
-> Status: DESIGN. Nothing here is built yet. Phases at the end.
+> Status: PARTLY BUILT. The tool registry, tool-use, the agent-loop Host
+> (`run.py chat`), and the deterministic architecture audit + its LLM layer
+> are implemented; see "Implementation status" at the end.
 
 ---
 
@@ -315,6 +317,27 @@ Phase 6  (optional) MCP Client: let the Host also consume EXTERNAL MCP
          servers (git, filesystem, ...).
 Phase 7  (optional) A critic/debate pass to double-check design findings.
 ```
+
+---
+
+## 9. Implementation status
+
+Built and verified (mock LLM where a key is needed):
+
+| Piece | Where | Status |
+|---|---|---|
+| Tool registry (stable contract) | `tool/tools.py` | ✅ |
+| Tool-use (both providers) | `tool/llm.py` `generate_with_tools` | ✅ |
+| Agent-loop Host + `run.py chat` | `tool/host.py` | ✅ |
+| Architecture audit — deterministic moat | `tool/architect/` (modules, checker, contract, audit) | ✅ |
+| Universal checks | `no_module_cycle` · `god_module` · `inverted_core` | ✅ |
+| User rules: prose → contract | `tool/architect/compiler.py` (+ `skills/architecture.md`) | ✅ |
+| False-positive gate (fan-out) | `tool/architect/verifier.py` | ✅ |
+
+Deliberately not built: a separate Synthesizer (the Host's LLM already
+explains tool results); MCP-client consumption of external servers; a
+debate pass. Real end-to-end `chat` against a live LLM is pending an API
+key (wiring proven with a scripted fake LLM over the real tools).
 
 Phases 1–4 deliver the full vision. Everything after is opt-in.
 
