@@ -68,4 +68,6 @@ def load_universal_contract() -> RuleContract:
         ArchRule("u.god", "god_module",
                  params={"min_dependents": 3, "ratio": 0.6},
                  source="universal"),
+        ArchRule("u.inverted", "inverted_core",
+                 params={"margin": 0.3}, source="universal"),
     ])

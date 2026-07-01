@@ -72,6 +72,42 @@ def check_god_module(rule, mg):
     return out
 
 
+def _instability(g, n):
+    """Martin's instability I = efferent / (afferent + efferent), i.e.
+    out / (in + out). I=0 → maximally stable (only depended upon); I=1 →
+    maximally unstable (only depends on others)."""
+    out_d, in_d = g.out_degree(n), g.in_degree(n)
+    total = out_d + in_d
+    return out_d / total if total else 0.0
+
+
+def check_inverted_core(rule, mg):
+    """Stable Dependencies Principle: dependencies should point toward more
+    stable modules. A stable *core* module (many depend on it) that itself
+    depends on a more *volatile* module is inverted — changes in the
+    volatile detail ripple up into the core. Conservative: only flags when
+    the source is a real core (in-degree ≥ 2) and the instability gap is
+    clear."""
+    g = mg.graph
+    if g.number_of_nodes() < 3:
+        return []
+    margin = rule.params.get("margin", 0.3)
+    out = []
+    for a, b in g.edges():
+        ia, ib = _instability(g, a), _instability(g, b)
+        if g.in_degree(a) >= 2 and (ib - ia) >= margin:
+            out.append(Finding(
+                rule_id=rule.id, kind=rule.kind, severity="medium",
+                title=f"Inverted dependency: {a} → {b}",
+                detail=(f"{a} is a stable core (instability {ia:.2f}, many "
+                        f"modules depend on it) yet depends on {b}, which is "
+                        f"more volatile (instability {ib:.2f}). Volatility in "
+                        f"{b} leaks into {a} — depend on an abstraction "
+                        f"instead of the concrete detail."),
+                modules=[a, b], evidence=g[a][b]["evidence"][:12]))
+    return out
+
+
 def check_forbid_dependency(rule, mg):
     """A user rule: module `from` must not depend on module `to`. Flags the
     edge if it exists. `from`/`to` are group (module) names produced by the
@@ -92,6 +128,7 @@ def check_forbid_dependency(rule, mg):
 RULE_CHECKERS = {
     "no_module_cycle": check_no_module_cycle,
     "god_module": check_god_module,
+    "inverted_core": check_inverted_core,
     "forbid_dependency": check_forbid_dependency,
 }
 
