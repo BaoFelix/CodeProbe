@@ -214,17 +214,59 @@ def _query_db(ctx, sql):
     return "\n".join(out)
 
 
-def _architecture_audit(ctx, strategy="auto"):
-    """Architecture-level (module) health check. Deterministic: groups
-    classes into modules and finds structural problems (module cycles, god
-    modules) — each with file:line evidence. No LLM, no API key. Requires a
-    prior scan."""
-    from .architect import run_architecture_audit, format_findings
+def _llm_ready(ctx):
+    """Is a real LLM endpoint configured? Governs whether the optional
+    LLM steps (compile user rules / verify) run — the universal audit
+    itself never needs one."""
+    return bool(getattr(ctx.llm, "api_key", "") and
+                getattr(ctx.llm, "api_url", ""))
+
+
+def _load_arch_skill():
+    """Read the user's plain-language architecture rules, if present."""
+    from pathlib import Path
+    for p in Path("skills").rglob("architecture.md") \
+            if Path("skills").is_dir() else []:
+        try:
+            return p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return None
+
+
+def _architecture_audit(ctx, strategy="auto", verify=False):
+    """Architecture-level (module) health check.
+
+    Core is deterministic: group classes into modules, find structural
+    problems (cycles, god modules, plus any rules the user declared) — each
+    with file:line evidence. No API key needed for the built-in checks.
+
+    Optional LLM steps (only if an endpoint is configured):
+      · skills/architecture.md present → compile the user's plain-language
+        rules into the contract (adds forbid_dependency + explicit groups).
+      · verify=true → drop LLM-judged false positives.
+    Requires a prior scan."""
+    from .architect import (run_architecture_audit, format_findings,
+                            load_universal_contract, RuleCompiler, Verifier)
     classes = [dict(r) for r in ctx.db.get_classes()]
     if not classes:
         return "Nothing to audit. Run scan_source first."
     rels = [dict(r) for r in ctx.db.get_relationships()]
-    findings, mg = run_architecture_audit(classes, rels, strategy=strategy)
+
+    contract = load_universal_contract()
+    groups = None
+    prose = _load_arch_skill()
+    if prose and _llm_ready(ctx):
+        user = RuleCompiler(ctx.llm).compile(prose, classes)
+        contract.rules.extend(user.rules)
+        groups = user.groups or None
+
+    findings, mg = run_architecture_audit(
+        classes, rels, strategy=strategy, contract=contract, groups=groups)
+
+    if verify and findings and _llm_ready(ctx):
+        findings = Verifier(ctx.llm).verify(findings)
+
     return format_findings(findings, mg)
 
 
@@ -272,7 +314,9 @@ def build_registry(ctx: ToolContext) -> dict:
                  "modules) with file:line evidence. Deterministic, no LLM. "
                  "Use for big-picture/system-shape questions. Requires a scan.",
                  _obj({"strategy": {"type": "string",
-                                    "description": "auto|folder|namespace|community"}}),
+                                    "description": "auto|folder|namespace|community"},
+                       "verify": {"type": "boolean",
+                                  "description": "LLM-verify findings to drop false positives"}}),
                  _architecture_audit),
         ToolSpec("design_review",
                  "Run the two-pass class-level LLM design review. Requires a "

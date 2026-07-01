@@ -14,6 +14,7 @@ modules); the user can force one, or supply explicit groups later.
 Pure code, no LLM, no I/O — input is plain rows, output is a ModuleGraph.
 """
 import os
+import fnmatch
 from dataclasses import dataclass, field
 
 import networkx as nx
@@ -71,6 +72,34 @@ def _by_community(classes, relationships):
     return idx
 
 
+def _class_matches(cls, patterns):
+    """A class belongs to a group if any pattern globs its file path,
+    short name, or qualified name."""
+    qn = cls["qualified_name"]
+    short = qn.split("::")[-1]
+    fp = cls.get("file_path") or ""
+    for p in patterns:
+        if fnmatch.fnmatch(fp, p) or fnmatch.fnmatch(short, p) \
+                or fnmatch.fnmatch(qn, p):
+            return True
+    return False
+
+
+def _by_explicit(classes, groups):
+    """Assign each class to the first user-defined group it matches;
+    unmatched classes land in '(unassigned)' so violations involving them
+    are still visible rather than silently dropped."""
+    idx = {}
+    for c in classes:
+        placed = None
+        for g in groups:
+            if _class_matches(c, g.match):
+                placed = g.name
+                break
+        idx[c["qualified_name"]] = placed or "(unassigned)"
+    return idx
+
+
 def _distinct(idx):
     return len(set(idx.values()))
 
@@ -82,8 +111,9 @@ class ModuleBuilder:
     edges (preserving the underlying class-edge evidence)."""
 
     @staticmethod
-    def build(classes, relationships, strategy="auto") -> ModuleGraph:
-        member_index, used = ModuleBuilder._assign(classes, relationships, strategy)
+    def build(classes, relationships, strategy="auto", groups=None) -> ModuleGraph:
+        member_index, used = ModuleBuilder._assign(
+            classes, relationships, strategy, groups)
 
         members = {}
         for qn, mod in member_index.items():
@@ -109,8 +139,12 @@ class ModuleBuilder:
                            members=members, strategy=used)
 
     @staticmethod
-    def _assign(classes, relationships, strategy):
+    def _assign(classes, relationships, strategy, groups=None):
         """Return (member_index, strategy_actually_used)."""
+        # Explicit user groups win when provided (that's the whole point of
+        # the user declaring them).
+        if groups:
+            return _by_explicit(classes, groups), "explicit"
         if strategy in ("auto", "folder"):
             folder = _by_folder(classes)
             if strategy == "folder" or _distinct(folder) >= 2:

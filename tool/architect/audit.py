@@ -15,10 +15,12 @@ from .contract import load_universal_contract
 
 
 def run_architecture_audit(classes, relationships, strategy="auto",
-                           contract=None):
+                           contract=None, groups=None):
     """Pure function: rows in, findings out. `classes` and `relationships`
-    are DB rows (dict-like). Returns (findings, module_graph)."""
-    mg = ModuleBuilder.build(classes, relationships, strategy=strategy)
+    are DB rows (dict-like). `groups` (list[Group]) forces explicit
+    grouping — otherwise `strategy` decides. Returns (findings, module_graph)."""
+    mg = ModuleBuilder.build(classes, relationships,
+                             strategy=strategy, groups=groups)
     contract = contract or load_universal_contract()
     findings = StructuralChecker.check(contract, mg)
     # heaviest first: high severity, then more modules involved

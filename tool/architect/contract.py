@@ -15,6 +15,17 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class Group:
+    """A named architectural region the user cares about (e.g. "UI",
+    "Infra"). `match` is a list of patterns; a class belongs if ANY matches
+    its file path, short name, or qualified name (fnmatch globs). Membership
+    is resolved deterministically at check time — the LLM only drafts these
+    patterns, it never decides membership itself."""
+    name: str
+    match: list = field(default_factory=list)
+
+
+@dataclass
 class ArchRule:
     """One checkable architecture rule. `kind` selects a checker in
     checker.RULE_CHECKERS; `params` are that checker's knobs."""
@@ -27,7 +38,8 @@ class ArchRule:
 
 @dataclass
 class RuleContract:
-    rules: list = field(default_factory=list)   # list[ArchRule]
+    rules: list = field(default_factory=list)    # list[ArchRule]
+    groups: list = field(default_factory=list)   # list[Group] (user-defined)
 
 
 @dataclass

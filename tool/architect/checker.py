@@ -72,10 +72,27 @@ def check_god_module(rule, mg):
     return out
 
 
+def check_forbid_dependency(rule, mg):
+    """A user rule: module `from` must not depend on module `to`. Flags the
+    edge if it exists. `from`/`to` are group (module) names produced by the
+    explicit grouping the RuleCompiler set up."""
+    g = mg.graph
+    frm, to = rule.params.get("from"), rule.params.get("to")
+    if not frm or not to or not g.has_edge(frm, to):
+        return []
+    return [Finding(
+        rule_id=rule.id, kind=rule.kind, severity="high",
+        title=f"Forbidden dependency: {frm} → {to}",
+        detail=(rule.text or f"{frm} must not depend on {to}.")
+               + f"  ({g[frm][to]['weight']} offending reference(s))",
+        modules=[frm, to], evidence=g[frm][to]["evidence"][:12])]
+
+
 # The registry: rule.kind → checker. Extend here to add a rule.
 RULE_CHECKERS = {
     "no_module_cycle": check_no_module_cycle,
     "god_module": check_god_module,
+    "forbid_dependency": check_forbid_dependency,
 }
 
 
