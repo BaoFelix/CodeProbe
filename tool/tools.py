@@ -214,6 +214,20 @@ def _query_db(ctx, sql):
     return "\n".join(out)
 
 
+def _architecture_audit(ctx, strategy="auto"):
+    """Architecture-level (module) health check. Deterministic: groups
+    classes into modules and finds structural problems (module cycles, god
+    modules) — each with file:line evidence. No LLM, no API key. Requires a
+    prior scan."""
+    from .architect import run_architecture_audit, format_findings
+    classes = [dict(r) for r in ctx.db.get_classes()]
+    if not classes:
+        return "Nothing to audit. Run scan_source first."
+    rels = [dict(r) for r in ctx.db.get_relationships()]
+    findings, mg = run_architecture_audit(classes, rels, strategy=strategy)
+    return format_findings(findings, mg)
+
+
 def _generate_report(ctx):
     """Render the self-contained HTML report from whatever is in the DB."""
     from .report import generate_html_report
@@ -252,6 +266,14 @@ def build_registry(ctx: ToolContext) -> dict:
                                        "description": "filter by source class"},
                        "limit": {"type": "integer"}}),
                  _get_relationships),
+        ToolSpec("architecture_audit",
+                 "Architecture-level health check: groups classes into "
+                 "modules and finds structural problems (module cycles, god "
+                 "modules) with file:line evidence. Deterministic, no LLM. "
+                 "Use for big-picture/system-shape questions. Requires a scan.",
+                 _obj({"strategy": {"type": "string",
+                                    "description": "auto|folder|namespace|community"}}),
+                 _architecture_audit),
         ToolSpec("design_review",
                  "Run the two-pass class-level LLM design review. Requires a "
                  "prior scan. Idempotent: skips if results exist.",
