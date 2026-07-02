@@ -133,8 +133,14 @@ class ModuleBuilder:
                 d = g[ms][mt]
                 d["weight"] += 1
                 d["evidence"].append(ev)
+                d["kinds"].add(r.get("kind"))
             else:
-                g.add_edge(ms, mt, weight=1, evidence=[ev])
+                # weight = how many class references back this module edge
+                # (≈ the cost of cutting it); kinds lets downstream
+                # consumers (the decoupling planner) pick a mechanism
+                # without re-parsing evidence strings.
+                g.add_edge(ms, mt, weight=1, evidence=[ev],
+                           kinds={r.get("kind")})
         return ModuleGraph(graph=g, member_index=member_index,
                            members=members, strategy=used)
 

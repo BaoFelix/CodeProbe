@@ -270,6 +270,21 @@ def _architecture_audit(ctx, strategy="auto", verify=False):
     return format_findings(findings, mg)
 
 
+def _decoupling_plan(ctx, strategy="auto"):
+    """Turn each module cycle into an ordered surgical plan: which edge to
+    cut (minimum feedback set — the cheapest cut), how to cut it (dependency
+    inversion or extract-shared-base, chosen from the real edge kinds), the
+    exact class references to change (file:line), and a refactor order that
+    keeps the build green. Deterministic, no LLM. Requires a scan."""
+    from .architect import ModuleBuilder, plan_decoupling, format_plans
+    classes = [dict(r) for r in ctx.db.get_classes()]
+    if not classes:
+        return "Nothing to plan. Run scan_source first."
+    rels = [dict(r) for r in ctx.db.get_relationships()]
+    mg = ModuleBuilder.build(classes, rels, strategy=strategy)
+    return format_plans(plan_decoupling(mg))
+
+
 def _generate_report(ctx):
     """Render the self-contained HTML report from whatever is in the DB."""
     from .report import generate_html_report
@@ -318,6 +333,16 @@ def build_registry(ctx: ToolContext) -> dict:
                        "verify": {"type": "boolean",
                                   "description": "LLM-verify findings to drop false positives"}}),
                  _architecture_audit),
+        ToolSpec("decoupling_plan",
+                 "For each module cycle, compute a surgical decoupling plan: "
+                 "the cheapest edge(s) to cut, the mechanism (dependency "
+                 "inversion / extract shared base), the exact file:line "
+                 "references to change, and a build-safe refactor order. "
+                 "Deterministic, no LLM. Use when the user asks HOW to break "
+                 "a cycle, not just whether one exists.",
+                 _obj({"strategy": {"type": "string",
+                                    "description": "auto|folder|namespace|community"}}),
+                 _decoupling_plan),
         ToolSpec("design_review",
                  "Run the two-pass class-level LLM design review. Requires a "
                  "prior scan. Idempotent: skips if results exist.",
