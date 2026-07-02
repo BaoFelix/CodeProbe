@@ -9,7 +9,6 @@ Key insight:
   - Pipeline (Coordinator) decides who to call and in what order
 ═══════════════════════════════════════
 """
-import re
 from pathlib import Path
 
 from .ts_parser import parse_project
@@ -26,26 +25,13 @@ class BaseAgent:
     3. Write results back to DB
     """
 
-    def __init__(self, llm, db, reader=None, prompts=None):
+    def __init__(self, llm, db, reader=None):
         self.llm = llm
         self.db = db
         self.reader = reader
-        self.prompts = prompts
 
     def run(self, *args, **kwargs):
         raise NotImplementedError
-
-    def _parse_fields(self, response, field_patterns):
-        """Generic defensive field parser.
-
-        field_patterns: dict of {key: regex_pattern_with_one_group}
-        Returns dict with matched values (empty string if not found).
-        """
-        result = {}
-        for key, pattern in field_patterns.items():
-            match = re.search(pattern, response, re.IGNORECASE)
-            result[key] = match.group(1).strip() if match else ''
-        return result
 
 
 class ScannerAgent(BaseAgent):

@@ -71,9 +71,13 @@ python run.py chat
 
 Two altitudes, picked by your question:
 - **Architecture level** — module cycles, god modules, inverted (unstable)
-  dependencies, and any rules you declare. The detection is deterministic
-  (graph algorithms, every finding carries `file:line` evidence); the LLM
-  only explains it. Runs even without an API key via the built-in checks.
+  dependencies, and any rules you declare. Ask *how* to break a cycle and
+  the decoupling planner answers surgically: the cheapest edge(s) to cut
+  (minimum feedback set), the mechanism (dependency inversion / extract
+  shared base), the exact `file:line` references to change, and a
+  build-safe refactor order. All of it is deterministic (graph algorithms;
+  every finding carries evidence); the LLM only explains it. Runs even
+  without an API key via the built-in checks.
 - **Class level** — the two-pass design review (per-class critique).
 
 ### Options
@@ -95,22 +99,19 @@ are excluded automatically.
       │
       ▼
  ts_parser.py      tree-sitter → entities + 6 relationship kinds
-      │
+      │            (signatures, fields, inheritance, body-call usage)
       ▼
  db.py             SQLite = shared memory between all stages
       │
-      ├────────────────────┐
-      ▼                    ▼
- workflow.py          design_critic.py
- graph analysis       two-pass LLM review
-      │                    │
-      └─────────┬──────────┘
+      ├────────────────────┬─────────────────────┐
+      ▼                    ▼                     ▼
+ workflow.py          design_critic.py      architect/
+ graph analysis       two-pass LLM review   module audit +
+      │                    │                decoupling plans
+      └─────────┬──────────┴─────────────────────┘
                 ▼
- report/        one self-contained interactive HTML
+ report/ · chat (host.py) · MCP — three ways to consume the same tools
 ```
-
-Full design rationale — including the ten key design decisions and the
-trade-offs behind them — is in [`architecture.md`](architecture.md).
 
 ## Configuration
 
