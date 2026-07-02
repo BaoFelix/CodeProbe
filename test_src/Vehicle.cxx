@@ -1,4 +1,15 @@
 #include "Vehicle.hxx"
+#include "DiagnosticTool.hxx"
+
+// Body-only coupling: DiagnosticTool never appears in Vehicle's fields or
+// method signatures — only inside this body. Before parser v4 this edge
+// was invisible (signatures-only mining).
+void Vehicle::RunDiagnostics() {
+    DiagnosticTool tool;                              // local declaration
+    tool.RunChecks();
+    double v = DiagnosticTool::Instance().Measure();  // scope access
+    m_currentSpeed = v;
+}
 
 void Vehicle::Start() {
     m_pEngine->Ignite();

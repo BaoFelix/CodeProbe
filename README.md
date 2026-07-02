@@ -50,10 +50,31 @@ python run.py report         # → outputs/report.html, open in any browser
 | Command | Description |
 |---------|-------------|
 | `init` | Initialize / reset the database |
-| `analyze <path>` | Full pipeline: scan → design review. `<path>` is a directory or a single header file |
+| `analyze <path>` | Fixed pipeline: scan → design review. `<path>` is a directory or a single header file |
+| `chat` | Talk to the codebase — an agentic loop that picks tools from your question (needs an LLM API key) |
 | `status` | Show analysis progress dashboard |
 | `report` | Generate the interactive HTML report |
 | `mcp-server` | Run as an MCP server so AI agents can drive the tool (`pip install mcp`) |
+
+### `chat` — the agentic way to use it
+
+`analyze` runs a fixed pipeline; `chat` lets you just ask. A Host loop sends
+your question plus the available tools to the LLM, which decides what to run
+— scan, retrieve the graph, audit the architecture, review class design,
+query the DB, or render a report — and answers you directly.
+
+```bash
+python run.py init
+python run.py chat
+# you › scan test_src, then tell me if the module architecture is healthy
+```
+
+Two altitudes, picked by your question:
+- **Architecture level** — module cycles, god modules, inverted (unstable)
+  dependencies, and any rules you declare. The detection is deterministic
+  (graph algorithms, every finding carries `file:line` evidence); the LLM
+  only explains it. Runs even without an API key via the built-in checks.
+- **Class level** — the two-pass design review (per-class critique).
 
 ### Options
 
@@ -119,11 +140,18 @@ Useful environment switches:
 The LLM key is only needed for the design review step; scanning,
 architecture derivation, and the HTML report all run offline.
 
-## Customizing the design review
+## Customizing
 
-Drop a `skills/design_critic.md` file in the project root to replace the
-built-in review methodology with your own prompt playbook — no code
-changes required.
+Two `skills/` files let you tailor the analysis without touching code:
+
+- **`skills/design_critic.md`** — replace the built-in class-level review
+  methodology with your own prompt playbook. See
+  [`skills/README.md`](skills/README.md).
+- **`skills/architecture.md`** — declare your architecture rules in plain
+  language (e.g. "the UI layer must not depend on the database layer"). The
+  architecture audit compiles them into checkable rules and reports any
+  violations with `file:line` evidence, alongside the built-in universal
+  checks. Copy `skills/architecture.example.md` to get started.
 
 ## Requirements
 

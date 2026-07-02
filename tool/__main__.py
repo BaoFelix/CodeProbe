@@ -27,6 +27,12 @@ def main():
         run_mcp_server()
         return
 
+    # chat drives the agentic Host, not the fixed Pipeline
+    if cmd == 'chat':
+        from .host import run_chat
+        run_chat()
+        return
+
     if cmd == 'help':
         _print_usage()
         return
@@ -66,6 +72,7 @@ Commands:
                           Supported formats: .hxx, .h, .hpp, .cxx, .cpp, .sch
   status                  Show analysis progress dashboard
   report                  Generate the interactive HTML report
+  chat                    Talk to the codebase (agentic; needs LLM API)
 
 Options:
   --from=STEP             Re-run from step: scan or review

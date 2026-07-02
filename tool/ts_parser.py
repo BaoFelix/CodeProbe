@@ -412,6 +412,70 @@ def _type_names_in(node):
         yield from _type_names_in(child)
 
 
+# Everything a body-mined name must NOT be. Broader than the signature
+# filter: bodies also mention containers/smart-pointers as *values*
+# (`std::vector<X> tmp;`) where only X is the real coupling.
+_BODY_NOISE = (_PRIMITIVES | _KEYWORDS | _STD_NOISE
+               | set(_CONTAINER_NAMES) | set(_SMART_PTRS) | {'std'})
+
+
+def _body_type_names(body):
+    """Mine USER-TYPE references from a method body (compound_statement).
+
+    Why not just reuse _type_names_in on the whole body: a body is mostly
+    identifiers that are NOT type references (locals, member calls,
+    function names — `Foo::Create()` would yield `Create`). And coupling
+    through member fields (`m_engine->Start()`) is already captured by the
+    field edges. So we cherry-pick the only places where a body introduces
+    a coupling the class doesn't already declare:
+
+        · local declarations      Foo f;   Foo* p = ...;
+        · new expressions         new Foo(...)
+        · casts / sizeof          static_cast<Foo*>(x), (Foo)y
+        · scope access            Foo::Create(), Foo::CONSTANT   ← the SCOPE
+        · template arguments      std::make_shared<Foo>(...)
+
+    Yields (name, row) pairs — row is the 0-based source line of the
+    reference, so each edge carries precise evidence.
+    """
+    def _emit(names_iter, node):
+        row = node.start_point[0]
+        for n in names_iter:
+            if n not in _BODY_NOISE:
+                yield n, row
+
+    def _walk(node):
+        t = node.type
+        if t in ('declaration', 'new_expression'):
+            ty = node.child_by_field_name('type')
+            if ty is not None:
+                yield from _emit(_type_names_in(ty), ty)
+            for c in node.children:            # initializer may nest more
+                if c is not ty:
+                    yield from _walk(c)
+            return
+        if t in ('type_descriptor', 'template_argument_list'):
+            # casts, sizeof, and explicit template args all wrap their
+            # types in these two node kinds.
+            yield from _emit(_type_names_in(node), node)
+            return
+        if t == 'qualified_identifier':
+            # `A::Foo::Create` — the innermost SCOPE segment (`Foo`) is the
+            # type being used; the last segment is a member name, skip it.
+            segs = node.text.decode().split('::')
+            if len(segs) >= 2:
+                scope = segs[-2].split('<')[0].strip()
+                if scope and scope not in _BODY_NOISE:
+                    yield scope, node.start_point[0]
+            for c in node.children:            # make_shared<Foo> template args
+                yield from _walk(c)
+            return
+        for c in node.children:
+            yield from _walk(c)
+
+    yield from _walk(body)
+
+
 def parse_file(file_path):
     """Parse a C++ file and return (entities, relationships).
 
@@ -661,6 +725,32 @@ def parse_file(file_path):
                 attrs={'via': 'method_signature'},
             ))
 
+        # ── body-call edges ──────────────────────────────────
+        # Signatures miss coupling that lives only inside the body
+        # (locals, statics, news, casts) — exactly what matters when
+        # judging how expensive an edge is to cut. Same dedupe set:
+        # if the signature already declared the type, one edge is enough.
+        body = next((c for c in decl.children
+                     if c.type == 'compound_statement'), None)
+        if body is not None:
+            for name, row in _body_type_names(body):
+                if name in own_segments:
+                    continue
+                key = (parent, name)
+                if key in seen_depends:
+                    continue
+                seen_depends.add(key)
+                relationships.append(Relationship(
+                    source_qname=parent,
+                    target_name=name,
+                    target_qname=same_file_index.get(name),
+                    kind='depends',
+                    evidence_file=str(path),
+                    evidence_line=row + 1,
+                    evidence_text=_line_text(source, row),
+                    attrs={'via': 'body_call'},
+                ))
+
     return entities, relationships
 
 
@@ -677,7 +767,8 @@ def _ancestor_types(node):
 # Bump when parser logic changes so cached entries get invalidated.
 # Any edit to parse_file / parse_sch_file / extract_aliases /
 # classify_field_type / _refine_class_kinds should bump this.
-PARSER_VERSION = 3
+# v4: body-call depends edges (locals / news / casts / scope access).
+PARSER_VERSION = 4
 
 
 _CPP_EXTS = {'.h', '.hxx', '.hpp', '.cxx', '.cpp', '.c'}
