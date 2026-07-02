@@ -154,9 +154,20 @@ Two `skills/` files let you tailor the analysis without touching code:
   violations with `file:line` evidence, alongside the built-in universal
   checks. Copy `skills/architecture.example.md` to get started.
 
+## Tests
+
+```bash
+pip install pytest
+python -m pytest tests/     # offline, keyless, ~1 second
+```
+
+The deterministic core (parser, module audit, decoupling planner) is tested
+exactly; every LLM seam is tested with fakes — the suite never touches the
+network.
+
 ## Requirements
 
 - Python 3.10+
 - `tree-sitter`, `tree-sitter-cpp`, `networkx` (see `requirements.txt`)
-- Optional: `mcp` for MCP server mode
+- Optional: `mcp` for MCP server mode; `pytest` for the test suite
 - LLM calls use stdlib `urllib` — no HTTP client dependency
