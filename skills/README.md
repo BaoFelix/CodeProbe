@@ -1,6 +1,15 @@
 # Custom Skills
 
-Drop a file here to override how CodeProbe reviews your code's design.
+Drop a file here to tailor CodeProbe without touching code. Two are
+recognized:
+
+- **`design_critic.md`** — override the class-level review methodology
+  (documented below).
+- **`architecture.md`** — declare architecture rules in plain language
+  (e.g. "UI must not depend on Infra"). The `architecture_audit` compiles
+  them into checkable rules and reports violations with `file:line`
+  evidence. Copy `architecture.example.md` to start. Only `architecture.md`
+  is loaded; the `.example` is ignored.
 
 ## How it works
 
