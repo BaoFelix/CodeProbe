@@ -15,14 +15,14 @@ from conftest import CannedLLM
 def make_openai(mock_reply):
     llm = LLMClient(api_url="http://x", api_key="k", model="m",
                     api_format="openai")
-    llm._post = lambda url, body, headers: (mock_reply, None)
+    llm._post = lambda url, body, headers: (mock_reply, None, None)
     return llm
 
 
 def make_anthropic(mock_reply):
     llm = LLMClient(api_url="http://x", api_key="k", model="m",
                     api_format="anthropic")
-    llm._post = lambda url, body, headers: (mock_reply, None)
+    llm._post = lambda url, body, headers: (mock_reply, None, None)
     return llm
 
 
@@ -62,9 +62,37 @@ class TestToolUseParsing:
     def test_http_error_degrades_not_raises(self):
         llm = LLMClient(api_url="http://x", api_key="k", model="m",
                         api_format="openai")
-        llm._post = lambda u, b, h: (None, "HTTP 429: rate limited")
+        llm._post = lambda u, b, h: (None, "network: down", None)
         r = llm.generate_with_tools([], [])
         assert "LLM error" in r.text and not r.tool_calls
+
+    def test_429_walks_the_fallback_chain(self):
+        # The agent loop must survive a rate-limited primary by degrading to
+        # the next model — same resilience as the batch generate() path.
+        llm = LLMClient(api_url="http://x", api_key="k", model="primary",
+                        api_format="openai")
+        llm._next_fallback = lambda m: "backup" if m == "primary" else None
+        seen = []
+
+        def fake_post(url, body, headers):
+            seen.append(body["model"])
+            if body["model"] == "primary":
+                return None, "HTTP 429: rate limited", 429
+            return {"choices": [{"message": {"role": "assistant",
+                                             "content": "recovered"}}]}, None, None
+
+        llm._post = fake_post
+        r = llm.generate_with_tools([], [])
+        assert seen == ["primary", "backup"]       # it actually fell back
+        assert r.text == "recovered"
+
+    def test_429_with_no_fallback_returns_error(self):
+        llm = LLMClient(api_url="http://x", api_key="k", model="only",
+                        api_format="openai")
+        llm._next_fallback = lambda m: None
+        llm._post = lambda u, b, h: (None, "HTTP 429", 429)
+        r = llm.generate_with_tools([], [])
+        assert "LLM error" in r.text
 
     def test_parse_args_tolerates_junk(self):
         assert LLMClient._parse_args("not json") == {}

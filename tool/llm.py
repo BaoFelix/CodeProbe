@@ -149,10 +149,12 @@ class LLMClient:
         """One turn of the loop. `messages` is the running provider-native
         history; `tools` is the schema list from tools.tool_schemas().
         Returns an LLMResponse (text + tool_calls + the assistant message
-        to append)."""
-        if self.api_format == "anthropic":
-            return self._tools_call_anthropic(messages, tools, system_prompt)
-        return self._tools_call_openai(messages, tools, system_prompt)
+        to append). On a 429 it walks the model fallback chain — the same
+        resilience the batch generate() path has — so a rate-limited primary
+        degrades to a weaker model instead of ending the agent's turn."""
+        call = (self._tools_call_anthropic if self.api_format == "anthropic"
+                else self._tools_call_openai)
+        return call(messages, tools, system_prompt, model=self.model)
 
     def tool_result_message(self, tool_call, result_text):
         """Build the provider-native message that reports one tool's result
@@ -180,26 +182,36 @@ class LLMClient:
             return {}
 
     def _post(self, url, body, headers):
-        """POST json → parsed json. Returns (data, error_str)."""
+        """POST json → parsed json. Returns (data, error_str, status_code).
+        status_code is the HTTP status on an HTTPError (so callers can spot
+        a 429), else None."""
         req = urllib.request.Request(
             url, data=json.dumps(body).encode("utf-8"),
             headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
-                return json.loads(resp.read().decode("utf-8")), None
+                return json.loads(resp.read().decode("utf-8")), None, None
         except urllib.error.HTTPError as e:
-            return None, f"HTTP {e.code}: {e.read().decode('utf-8','replace')[:200]}"
+            return (None,
+                    f"HTTP {e.code}: {e.read().decode('utf-8','replace')[:200]}",
+                    e.code)
         except urllib.error.URLError as e:
-            return None, f"network: {e.reason}"
+            return None, f"network: {e.reason}", None
         except (json.JSONDecodeError, KeyError, IndexError) as e:
-            return None, f"parse: {e}"
+            return None, f"parse: {e}", None
 
-    def _tools_call_openai(self, messages, tools, system_prompt):
+    @staticmethod
+    def _tool_error(err):
+        return LLMResponse(text=f"[LLM error: {err}]", tool_calls=[],
+                           assistant_message={"role": "assistant",
+                                              "content": ""})
+
+    def _tools_call_openai(self, messages, tools, system_prompt, model):
         msgs = list(messages)
         if system_prompt:
             msgs = [{"role": "system", "content": system_prompt}] + msgs
         body = {
-            "model": self.model,
+            "model": model,
             "messages": msgs,
             "tools": [{"type": "function", "function": t} for t in tools],
             "tool_choice": "auto",
@@ -209,11 +221,13 @@ class LLMClient:
         url = self.api_url.rstrip("/") + "/chat/completions"
         headers = {"Content-Type": "application/json",
                    "Authorization": f"Bearer {self.api_key}"}
-        data, err = self._post(url, body, headers)
+        data, err, status = self._post(url, body, headers)
+        if status == 429:                             # rate-limited → fall back
+            nxt = self._next_fallback(model)
+            if nxt:
+                return self._tools_call_openai(messages, tools, system_prompt, nxt)
         if err:
-            return LLMResponse(text=f"[LLM error: {err}]", tool_calls=[],
-                               assistant_message={"role": "assistant",
-                                                  "content": ""})
+            return self._tool_error(err)
         msg = data["choices"][0]["message"]
         calls = [ToolCall(id=c["id"], name=c["function"]["name"],
                           args=self._parse_args(c["function"].get("arguments")))
@@ -221,9 +235,9 @@ class LLMClient:
         return LLMResponse(text=msg.get("content") or "",
                            tool_calls=calls, assistant_message=msg)
 
-    def _tools_call_anthropic(self, messages, tools, system_prompt):
+    def _tools_call_anthropic(self, messages, tools, system_prompt, model):
         body = {
-            "model": self.model,
+            "model": model,
             "max_tokens": 4096,
             "messages": list(messages),
             "tools": [{"name": t["name"], "description": t["description"],
@@ -235,11 +249,14 @@ class LLMClient:
         headers = {"Content-Type": "application/json",
                    "x-api-key": self.api_key,
                    "anthropic-version": "2023-06-01"}
-        data, err = self._post(url, body, headers)
+        data, err, status = self._post(url, body, headers)
+        if status == 429:                             # rate-limited → fall back
+            nxt = self._next_fallback(model)
+            if nxt:
+                return self._tools_call_anthropic(messages, tools,
+                                                  system_prompt, nxt)
         if err:
-            return LLMResponse(text=f"[LLM error: {err}]", tool_calls=[],
-                               assistant_message={"role": "assistant",
-                                                  "content": ""})
+            return self._tool_error(err)
         blocks = data.get("content", [])
         text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
         calls = [ToolCall(id=b["id"], name=b["name"],
