@@ -104,14 +104,36 @@ def _scan_source(ctx, directory="", force=False):
     return f"Scan complete: {count} classes registered from {scan_dir}."
 
 
+def _resolution_note(rels):
+    """Disclose how much of the graph is actually connected. Unresolved
+    cross-file targets are dropped from analysis (we under-connect rather
+    than fabricate), so a high unresolved fraction means absence of
+    findings must be read with caution — the dangerous failure mode of a
+    trust tool is confident silence, so we surface it."""
+    total = len(rels)
+    if not total:
+        return None
+    unresolved = sum(1 for r in rels if not r["target_qname"])
+    pct = 100.0 * unresolved / total
+    note = f"relationships: {total} ({unresolved} unresolved targets, {pct:.0f}%)"
+    if pct > 25:
+        note += (" — coverage caution: many cross-file names did not "
+                 "resolve; treat the ABSENCE of findings carefully.")
+    return note
+
+
 def _get_overview(ctx):
-    """High-level snapshot: class count, orchestrator, architecture style."""
+    """High-level snapshot: class count, orchestrator, architecture style,
+    and graph-coverage disclosure."""
     stats = ctx.db.get_stats()
     if not stats or not stats["total"]:
         return "The DB is empty. Run scan_source first."
     mi = ctx.db.get_module_info()
     lines = [f"classes: {stats['total']}",
              f"critic subtrees analyzed: {stats['analyzed']}"]
+    note = _resolution_note(ctx.db.get_relationships())
+    if note:
+        lines.append(note)
     if mi:
         lines += [f"orchestrator: {mi['orchestrator'] or '—'}",
                   f"style: {mi['style'] or 'oop'}"]
@@ -154,12 +176,23 @@ def _get_relationships(ctx, class_qname="", limit=200):
 
 def _design_review(ctx, force=False):
     """Run the two-pass LLM design review (class-level). Requires a scan.
-    Idempotent: skips if results already exist unless force=true."""
+    Idempotent — but staleness-aware: a stored review counts as cached
+    only while the relationship graph it was computed from is still the
+    graph in the DB. After a rescan changes the graph, the review re-runs
+    automatically instead of serving stale conclusions."""
+    from .db import graph_fingerprint
     if not ctx.db.get_classes():
         return "Nothing to review. Run scan_source first."
-    if not force and ctx.db.get_design_module():
-        return ("Design review already exists in the DB — reading from it "
-                "(pass force=true to re-run).")
+    existing = ctx.db.get_design_module()
+    if not force and existing:
+        current = graph_fingerprint(ctx.db.get_relationships())
+        stored = existing["graph_hash"] if "graph_hash" in existing.keys() \
+            else None
+        if stored == current:
+            return ("Design review already exists and the graph is "
+                    "unchanged — reading from it (pass force=true to "
+                    "re-run anyway).")
+        # fall through: graph changed (or legacy row without a hash)
     critic = DesignCriticAgent(llm=ctx.llm, db=ctx.db, reader=ctx.reader)
     if not critic.run():
         return "Design review failed."
@@ -270,7 +303,11 @@ def _architecture_audit(ctx, strategy="auto", verify=False):
     if verify and findings and _llm_ready(ctx):
         findings = Verifier(ctx.llm).verify(findings)
 
-    return format_findings(findings, mg)
+    out = format_findings(findings, mg)
+    note = _resolution_note(rels)
+    if note:
+        out = note + "\n" + out
+    return out
 
 
 def _decoupling_plan(ctx, strategy="auto"):

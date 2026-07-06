@@ -25,8 +25,20 @@ TABLES
 Every method opens and closes its own connection — simple and
 thread-safe (the LLM step used to run 3 threads in parallel).
 """
+import hashlib
 import sqlite3
 from pathlib import Path
+
+
+def graph_fingerprint(relationships):
+    """Stable hash of the relationship graph's shape. Used to detect a
+    STALE design review: results are skipped-as-cached only while the
+    graph they were computed from is still the graph in the DB. Rows may
+    be sqlite Rows or dicts; order-insensitive by construction."""
+    lines = sorted(
+        f"{r['source_qname']}|{r['target_qname'] or r['target_name']}|{r['kind']}"
+        for r in relationships)
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
 class DBManager:
@@ -38,9 +50,18 @@ class DBManager:
     # ─── Connection Helper ───────────────────────────────────
 
     def _connect(self):
-        """Create a new connection (each call = own connection, thread-safe)."""
+        """Create a new connection (each call = own connection, thread-safe).
+
+        WAL lets readers proceed while a writer commits (e.g. the Verifier's
+        thread-pool reading evidence while a scan writes), and busy_timeout
+        makes a second writer wait instead of failing with
+        'database is locked' — the two settings that make connection-per-call
+        safe under real concurrency, not just single-analyst use.
+        """
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     def _execute(self, sql, params=None):
@@ -186,17 +207,28 @@ class DBManager:
                     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
 
-                /* ── design_critic_module: synthesis pass output. */
+                /* ── design_critic_module: synthesis pass output.
+                   graph_hash fingerprints the relationship graph the
+                   review was computed from, so staleness is detectable. */
                 CREATE TABLE IF NOT EXISTS design_critic_module (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
                     module_name     TEXT NOT NULL,
                     prompt          TEXT,
                     raw_response    TEXT,
                     parsed_json     TEXT,
+                    graph_hash      TEXT,
                     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
             conn.commit()
+            # Migration for DBs created before graph_hash existed —
+            # idempotent: ALTER fails harmlessly once the column is there.
+            try:
+                conn.execute("ALTER TABLE design_critic_module "
+                             "ADD COLUMN graph_hash TEXT")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
         finally:
             conn.close()
 
@@ -443,14 +475,15 @@ class DBManager:
         """, (subtree_root, prompt, raw_response,
               _json.dumps(parsed) if parsed else None))
 
-    def save_design_module(self, module_name, prompt, raw_response, parsed):
+    def save_design_module(self, module_name, prompt, raw_response, parsed,
+                           graph_hash=None):
         import json as _json
         self._execute("""
             INSERT INTO design_critic_module
-                (module_name, prompt, raw_response, parsed_json)
-            VALUES (?, ?, ?, ?)
+                (module_name, prompt, raw_response, parsed_json, graph_hash)
+            VALUES (?, ?, ?, ?, ?)
         """, (module_name, prompt, raw_response,
-              _json.dumps(parsed) if parsed else None))
+              _json.dumps(parsed) if parsed else None, graph_hash))
 
     def get_design_subtrees(self):
         """Latest analysis per subtree_root."""

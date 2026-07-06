@@ -32,11 +32,22 @@ class ModuleGraph:
 # ── membership strategies (each: classes -> {qname: module}) ─────────
 
 def _by_folder(classes):
+    """Module = the class's directory path RELATIVE to the common source
+    root. Using the full relative path (not the basename) keeps two
+    unrelated leaf folders distinct — `geometry/util` and `io/util` must
+    not merge into one phantom `util` module, or the audit can report
+    cycles/god-modules that don't exist."""
+    dirs = [os.path.dirname(c.get("file_path") or "") for c in classes]
+    nonempty = [d for d in dirs if d]
+    try:
+        common = os.path.commonpath(nonempty) if len(nonempty) > 1 else ""
+    except ValueError:              # mixed absolute/relative or drives
+        common = ""
     idx = {}
-    for c in classes:
-        fp = c.get("file_path") or ""
-        d = os.path.basename(os.path.dirname(fp)) or "(root)"
-        idx[c["qualified_name"]] = d
+    for c, d in zip(classes, dirs):
+        rel = os.path.relpath(d, common) if common and d else d
+        module = rel.replace(os.sep, "/") if rel and rel != "." else "(root)"
+        idx[c["qualified_name"]] = module
     return idx
 
 
@@ -129,18 +140,21 @@ class ModuleBuilder:
             if ms == mt:
                 continue                       # internal to a module — ignore
             ev = _evidence_str(r)
+            kind = r.get("kind")
             if g.has_edge(ms, mt):
                 d = g[ms][mt]
                 d["weight"] += 1
                 d["evidence"].append(ev)
-                d["kinds"].add(r.get("kind"))
+                d["kinds"].add(kind)
+                d["kind_counts"][kind] = d["kind_counts"].get(kind, 0) + 1
             else:
-                # weight = how many class references back this module edge
-                # (≈ the cost of cutting it); kinds lets downstream
-                # consumers (the decoupling planner) pick a mechanism
-                # without re-parsing evidence strings.
+                # weight = how many class references back this module edge;
+                # kind_counts breaks that down per relationship kind so the
+                # decoupling planner can price a cut by WHAT it severs
+                # (an inherits reference is a heavier refactor than a
+                # depends reference), not just how many lines it touches.
                 g.add_edge(ms, mt, weight=1, evidence=[ev],
-                           kinds={r.get("kind")})
+                           kinds={kind}, kind_counts={kind: 1})
         return ModuleGraph(graph=g, member_index=member_index,
                            members=members, strategy=used)
 

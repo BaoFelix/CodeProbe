@@ -269,8 +269,14 @@ class DesignCriticAgent(BaseAgent):
                                                 cross_relations)
         module_response = self.llm.generate(module_prompt, tag="critic_module")
         module_parsed = _safe_parse_json(module_response)
+        # Fingerprint the graph this review was computed FROM, so the
+        # design_review tool can tell a cached result from a stale one
+        # after the next rescan changes the graph.
+        from .db import graph_fingerprint
         self.db.save_design_module('default', module_prompt, module_response,
-                                   module_parsed)
+                                   module_parsed,
+                                   graph_hash=graph_fingerprint(
+                                       self.db.get_relationships()))
 
         if module_parsed:
             recs = module_parsed.get('recommendations', [])

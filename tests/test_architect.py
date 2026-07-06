@@ -21,6 +21,16 @@ class TestModuleBuilder:
         assert mg.member_index == {"A1": "A", "B1": "B"}
         assert mg.strategy == "folder"
 
+    def test_two_unrelated_util_folders_stay_distinct(self):
+        # geometry/util and io/util must NOT merge into one phantom "util"
+        # module — basename grouping would fabricate cycles/god-modules.
+        classes = [
+            {"qualified_name": "GeomHelper", "file_path": "src/geometry/util/GeomHelper.hxx"},
+            {"qualified_name": "IoHelper",   "file_path": "src/io/util/IoHelper.hxx"},
+        ]
+        mg = ModuleBuilder.build(classes, [], strategy="folder")
+        assert mg.member_index["GeomHelper"] != mg.member_index["IoHelper"]
+
     def test_explicit_groups_win(self):
         classes = [{"qualified_name": "AppView", "file_path": "ui/AppView.hxx"},
                    {"qualified_name": "DbConn", "file_path": "infra/DbConn.hxx"}]

@@ -68,6 +68,50 @@ class TestScanIdempotency:
         assert "--inherits-->" in rels and ".sch:" in rels
 
 
+class TestDesignReviewStaleness:
+    """A stored review counts as cached only while the graph is unchanged."""
+
+    def _fake_critic(self, calls):
+        class FakeCritic:
+            def __init__(self, llm=None, db=None, reader=None):
+                self.db = db
+
+            def run(self):
+                calls.append(1)
+                from tool.db import graph_fingerprint
+                self.db.save_design_module(
+                    "default", "p", "r", {"recommendations": []},
+                    graph_hash=graph_fingerprint(self.db.get_relationships()))
+                return True
+        return FakeCritic
+
+    def test_rerun_skipped_while_graph_unchanged(self, tmp_path, monkeypatch):
+        import tool.tools as T
+        ctx = fresh_ctx(tmp_path)
+        registry = build_registry(ctx)
+        run_tool(registry, "scan_source", {"directory": "test_src"}, ctx)
+        calls = []
+        monkeypatch.setattr(T, "DesignCriticAgent", self._fake_critic(calls))
+        assert "complete" in run_tool(registry, "design_review", {}, ctx)
+        out = run_tool(registry, "design_review", {}, ctx)
+        assert "unchanged" in out           # second call is a cache hit
+        assert len(calls) == 1
+
+    def test_rerun_happens_when_graph_changed(self, tmp_path, monkeypatch):
+        import tool.tools as T
+        ctx = fresh_ctx(tmp_path)
+        registry = build_registry(ctx)
+        run_tool(registry, "scan_source", {"directory": "test_src"}, ctx)
+        calls = []
+        monkeypatch.setattr(T, "DesignCriticAgent", self._fake_critic(calls))
+        run_tool(registry, "design_review", {}, ctx)
+        # simulate a rescan that changed the graph
+        ctx.db._execute("DELETE FROM relationships WHERE rowid IN "
+                        "(SELECT rowid FROM relationships LIMIT 1)")
+        run_tool(registry, "design_review", {}, ctx)
+        assert len(calls) == 2              # stale → re-ran, no force needed
+
+
 class TestHostLoop:
     def test_loop_runs_tools_then_answers(self, tmp_path):
         script = [tool_step("scan_source", {"directory": "test_src"}),

@@ -39,6 +39,26 @@ import networkx as nx
 # cycles are far smaller; this is a safety valve, not a tuning knob.
 _EXACT_SEARCH_MAX_EDGES = 12
 
+# What a cut actually costs is not just HOW MANY references it severs but
+# WHAT KIND they are: removing an inheritance reference means extracting a
+# shared base (a real refactor); removing a signature/body `depends` is
+# often a one-line interface insertion. These multipliers price that
+# asymmetry so the optimizer prefers the structurally easier surgery even
+# when the raw reference counts are equal.
+_KIND_COST = {
+    "inherits": 3.0, "implements": 2.0, "composes": 2.0,
+    "aggregates": 1.5, "associates": 1.0, "depends": 1.0,
+}
+
+
+def _edge_cost(data):
+    """Refactoring cost of severing one module edge = Σ count × kind-price.
+    Falls back to the raw reference count when kind_counts is absent."""
+    counts = data.get("kind_counts")
+    if not counts:
+        return float(data.get("weight", 1))
+    return sum(n * _KIND_COST.get(k, 1.0) for k, n in counts.items())
+
 
 @dataclass
 class Cut:
@@ -61,14 +81,17 @@ class DecouplePlan:
 # ── 1. which edges to cut ───────────────────────────────────────────
 
 def _min_feedback_edges(sub):
-    """Smallest-total-weight edge set whose removal makes `sub` acyclic.
+    """Smallest-total-COST edge set whose removal makes `sub` acyclic.
+    Cost = kind-weighted refactoring price (_edge_cost), not raw reference
+    count — so at equal reference counts the optimizer severs a `depends`
+    edge before an `inherits` edge.
 
     Exact for small SCCs: try all subsets of size 1, 2, … ordered so the
     first acyclic hit is minimal in cost among that size (good enough —
     a 1-edge cut always beats any 2-edge cut in disruption, even at equal
-    reference count). Greedy fallback for oversized cycles.
+    cost). Greedy fallback for oversized cycles.
     """
-    edges = list(sub.edges(data="weight"))
+    edges = [(u, v, _edge_cost(d)) for u, v, d in sub.edges(data=True)]
     if len(edges) <= _EXACT_SEARCH_MAX_EDGES:
         for size in range(1, len(edges) + 1):
             best = None
@@ -76,17 +99,17 @@ def _min_feedback_edges(sub):
                 trial = sub.copy()
                 trial.remove_edges_from([(u, v) for u, v, _ in combo])
                 if nx.is_directed_acyclic_graph(trial):
-                    cost = sum(w for _, _, w in combo)
+                    cost = sum(c for _, _, c in combo)
                     if best is None or cost < best[0]:
                         best = (cost, combo)
             if best:
                 return [(u, v) for u, v, _ in best[1]]
-    # Greedy: while a cycle remains, drop its lightest edge.
+    # Greedy: while a cycle remains, drop its cheapest edge.
     trial = sub.copy()
     cuts = []
     while not nx.is_directed_acyclic_graph(trial):
         cycle = nx.find_cycle(trial)
-        u, v = min(cycle, key=lambda e: trial[e[0]][e[1]]["weight"])[:2]
+        u, v = min(cycle, key=lambda e: _edge_cost(trial[e[0]][e[1]]))[:2]
         cuts.append((u, v))
         trial.remove_edge(u, v)
     return cuts

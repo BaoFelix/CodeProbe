@@ -104,6 +104,35 @@ def build_graph(entities, relationships):
     return g
 
 
+def _reach_counts(g):
+    """|descendants(n)| for EVERY node in one sweep.
+
+    Calling nx.descendants per node is all-pairs BFS — O(V·(V+E)), the
+    real scaling wall on a 7,000-class graph. Instead: condense to the
+    SCC DAG, then one reverse-topological pass builds, per SCC, a bitmask
+    of every node reachable from it (own members | successors' masks).
+    Bitmasks make the union a single C-speed OR on big ints, and every
+    node in an SCC shares the answer: popcount(mask) - 1 (minus itself —
+    all other members of its own SCC are reachable by definition).
+    """
+    idx = {n: i for i, n in enumerate(g.nodes)}
+    C = nx.condensation(g)                 # DAG; C.nodes[c]['members']
+    full = {}
+    for c in reversed(list(nx.topological_sort(C))):
+        mask = 0
+        for n in C.nodes[c]['members']:
+            mask |= 1 << idx[n]
+        for succ in C.successors(c):
+            mask |= full[succ]
+        full[c] = mask
+    counts = {}
+    for c in C.nodes:
+        reach = full[c].bit_count() - 1
+        for n in C.nodes[c]['members']:
+            counts[n] = reach
+    return counts
+
+
 def score_nodes(g):
     """Score every node for its 'orchestrator-ness'.
 
@@ -113,12 +142,12 @@ def score_nodes(g):
 
     Returns {qname: {'out', 'in', 'reach', 'score'}}.
     """
+    reach_of = _reach_counts(g)            # one pass, not per-node BFS
     scores = {}
     for n in g.nodes:
         out_w = g.out_degree(n, weight='weight')
         in_w = g.in_degree(n, weight='weight')
-        # reachable set: how much downstream work this node can pull in
-        reach = len(nx.descendants(g, n))
+        reach = reach_of[n]
         # The judgement formula: reward fan-out and reach, penalize being
         # depended upon. Coefficients are deliberately simple & tunable.
         score = out_w + 0.5 * reach - 0.8 * in_w
@@ -133,13 +162,10 @@ def score_nodes(g):
 
 def classify_utility(g, n):
     """Tool/infrastructure signature: depended upon by many, depends on
-    little, shallow reach. These get routed to a side list, not the
-    main responsibility tree.
+    nothing. (out_degree == 0 already implies an empty reachable set, so
+    no reachability query is needed.)
     """
-    in_deg = g.in_degree(n)
-    out_deg = g.out_degree(n)
-    reach = len(nx.descendants(g, n))
-    return in_deg >= 2 and out_deg == 0 and reach == 0
+    return g.in_degree(n) >= 2 and g.out_degree(n) == 0
 
 
 # ── Architecture-style detection ──────────────────────────────

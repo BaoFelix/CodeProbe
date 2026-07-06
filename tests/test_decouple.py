@@ -51,14 +51,28 @@ class TestCutSelection:
 
 class TestPrescription:
     def test_inheritance_coupling_gets_extract_base(self):
+        # X→Y is one inherits reference (kind-cost 3); Y→X is four depends
+        # references (cost 4) — the inherits side is still the cheaper cut,
+        # and an inheritance cut must prescribe extract-shared-base.
         classes = [make_class("X1", "X"), make_class("Y1", "Y")]
-        rels = [make_rel("X1", "Y1", "inherits"),
-                make_rel("Y1", "X1", "depends"),
-                make_rel("Y1", "X1", "depends", "y2.hxx", 2)]
-        (plan,) = plans_for(classes, rels)     # X→Y (×1) is the cheap cut
+        rels = [make_rel("X1", "Y1", "inherits")] + \
+               [make_rel("Y1", "X1", "depends", f"y{i}.hxx", i)
+                for i in range(4)]
+        (plan,) = plans_for(classes, rels)
         cut = plan.cuts[0]
         assert (cut.source, cut.target) == ("X", "Y")
         assert "extract the shared base" in cut.mechanism
+
+    def test_equal_refs_prefers_cutting_depends_over_inherits(self):
+        # Same reference count both ways (1 vs 1), but one direction is
+        # inheritance: the planner must sever the depends edge — cutting a
+        # base-class relationship is the structurally harder surgery.
+        classes = [make_class("X1", "X"), make_class("Y1", "Y")]
+        rels = [make_rel("X1", "Y1", "inherits"),
+                make_rel("Y1", "X1", "depends")]
+        (plan,) = plans_for(classes, rels)
+        assert (plan.cuts[0].source, plan.cuts[0].target) == ("Y", "X")
+        assert "Dependency inversion" in plan.cuts[0].mechanism
 
     def test_usage_coupling_gets_dependency_inversion(self):
         classes = [make_class("A1", "A"), make_class("B1", "B")]
