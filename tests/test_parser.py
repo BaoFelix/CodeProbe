@@ -68,6 +68,128 @@ void Car::Go() { m_engine->Start(); }
         assert body[0].evidence_line > 0
 
 
+class TestAliasKindReclassification:
+    """An alias may hide a wrapper: the ownership kind must be judged from
+    the alias's REAL type text, not the bare alias name."""
+
+    def test_shared_ptr_alias_is_associates_not_composes(self, tmp_path):
+        src = tmp_path / "Sinks.hxx"
+        src.write_text("""
+class Sink {};
+using sink_ptr = std::shared_ptr<Sink>;
+class Logger { sink_ptr m_sink; };
+""")
+        _, rels, _ = __import__("tool.ts_parser", fromlist=["parse_project"]) \
+            .parse_project(str(tmp_path), cache=None)
+        edge = next(r for r in rels if r.source_qname == "Logger"
+                    and r.target_name == "Sink")
+        # direct spelling std::shared_ptr<Sink> would be associates;
+        # the alias must not smuggle it up to composes (level 4 vs 1)
+        assert edge.kind == "associates", edge
+        assert edge.attrs.get("alias_from") == "sink_ptr"
+
+    def test_alias_chain_outermost_wrapper_wins(self, tmp_path):
+        src = tmp_path / "Chain.hxx"
+        src.write_text("""
+class Foo {};
+using FooPtr = Foo*;
+using P = FooPtr;
+class Owner { P m_p; };
+""")
+        _, rels, _ = __import__("tool.ts_parser", fromlist=["parse_project"]) \
+            .parse_project(str(tmp_path), cache=None)
+        edge = next(r for r in rels if r.source_qname == "Owner"
+                    and r.target_name == "Foo")
+        assert edge.kind == "associates", edge
+
+    def test_bare_value_alias_stays_composes(self, tmp_path):
+        src = tmp_path / "Val.hxx"
+        src.write_text("""
+class Foo {};
+using V = Foo;
+class Owner { V m_v; };
+""")
+        _, rels, _ = __import__("tool.ts_parser", fromlist=["parse_project"]) \
+            .parse_project(str(tmp_path), cache=None)
+        edge = next(r for r in rels if r.source_qname == "Owner"
+                    and r.target_name == "Foo")
+        assert edge.kind == "composes", edge
+
+
+class TestParserAccuracyGuards:
+    def test_same_file_short_name_collision_stays_unresolved(self, tmp_path):
+        # Two classes named Handler in one file: binding to either would be
+        # a guess. Same-file resolution must leave the target unresolved
+        # (the safe direction) instead of last-parsed-wins.
+        src = tmp_path / "Two.hxx"
+        src.write_text("""
+namespace A { class Handler {}; }
+namespace B { class Handler {}; }
+class User { Handler* m_h; };
+""")
+        from tool.ts_parser import parse_file
+        _, rels = parse_file(str(src))
+        edge = next(r for r in rels if r.source_qname == "User"
+                    and r.target_name == "Handler")
+        assert edge.target_qname is None
+
+    def test_locals_in_bodies_are_not_method_entities(self, tmp_path):
+        # `Widget w(x);` inside a method body must not become a method
+        # entity of the enclosing class.
+        src = tmp_path / "Local.hxx"
+        src.write_text("""
+class Widget { public: Widget(int); };
+class Car {
+public:
+    void Go() {
+        Widget w(1);
+        (void)w;
+    }
+};
+""")
+        from tool.ts_parser import parse_file
+        ents, _ = parse_file(str(src))
+        car_methods = [e.name for e in ents
+                       if e.kind == "method" and e.parent_qname == "Car"]
+        assert "Go" in car_methods
+        assert "w" not in car_methods
+
+    def test_scanned_namespace_is_never_promoted_to_phantom(self, tmp_path):
+        # free function out-of-line in a namespace that IS scanned →
+        # no phantom class 'util' may appear.
+        (tmp_path / "util.hxx").write_text("namespace util { void init(); }")
+        (tmp_path / "util.cxx").write_text(
+            '#include "util.hxx"\nvoid util::init() { }\n')
+        from tool.ts_parser import parse_project
+        ents, _, _ = parse_project(str(tmp_path), cache=None)
+        phantoms = [e for e in ents if e.attrs.get("phantom")]
+        assert not any(e.qualified_name == "util" for e in phantoms), phantoms
+
+    def test_phantom_promotion_for_unseen_class(self, tmp_path):
+        # lone .cxx with out-of-line methods of an unseen class → phantom
+        # class materialized, flagged, participating in the graph.
+        (tmp_path / "Impl.cxx").write_text("""
+void Engine::Start() { }
+void Engine::Stop() { }
+""")
+        from tool.ts_parser import parse_project
+        ents, _, _ = parse_project(str(tmp_path), cache=None)
+        eng = next(e for e in ents if e.qualified_name == "Engine")
+        assert eng.attrs.get("phantom") is True
+        assert eng.kind == "class"
+
+    def test_stats_files_parsed_excludes_vendored(self, tmp_path):
+        (tmp_path / "a.hxx").write_text("class A {};")
+        vend = tmp_path / "third_party"
+        vend.mkdir()
+        (vend / "b.hxx").write_text("class B {};")
+        from tool.ts_parser import parse_project
+        ents, _, stats = parse_project(str(tmp_path), cache=None)
+        assert stats["files_parsed"] == 1
+        assert stats["skipped_vendored"] == 1
+        assert not any(e.name == "B" for e in ents)
+
+
 class TestGroundingGuarantees:
     """Every relationship must be traceable to real source."""
 

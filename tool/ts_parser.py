@@ -147,6 +147,22 @@ def _kind_of(node):
     }[node.type]
 
 
+def _inside_function_body(node):
+    """True when `node` sits inside some function's compound_statement —
+    i.e. it's a local, not a class member. Walk stops at the first
+    container so an out-of-line definition itself (whose parents are
+    namespace/translation_unit) is NOT flagged."""
+    cur = node.parent
+    while cur is not None:
+        if cur.type == 'compound_statement':
+            return True
+        if cur.type in ('class_specifier', 'struct_specifier',
+                        'namespace_definition', 'translation_unit'):
+            return False
+        cur = cur.parent
+    return False
+
+
 def _enclosing_container_qname(node, container_types):
     """Walk up from `node` and build the qualified name of the nearest
     enclosing namespace/class/struct chain. Returns None if at top level.
@@ -532,6 +548,11 @@ def parse_file(file_path):
     # defined here. We split the qualified name to recover parent + short.
     for _idx, caps in QueryCursor(_METHOD_IN_CLASS_QUERY).matches(root):
         decl = caps['decl'][0]
+        if _inside_function_body(decl):
+            # A declaration nested in some method's body is a LOCAL
+            # (`Widget w(x);`), not a method of the enclosing class —
+            # without this guard it becomes a bogus method entity.
+            continue
         name_node = caps['name'][0]
         raw_name = name_node.text.decode()
         parent_qname = _enclosing_container_qname(
@@ -602,10 +623,17 @@ def parse_file(file_path):
 
     # ── relationships: inheritance ────────────────────────
     # Build a lookup of "short name → qualified_name" for same-file
-    # target resolution (used to fill target_qname when possible).
-    same_file_index = {e.name: e.qualified_name
-                       for e in entities
-                       if e.kind in ('class', 'struct', 'interface')}
+    # target resolution. A short name declared TWICE in one file
+    # (e.g. A::Handler and B::Handler) is ambiguous — binding to
+    # whichever class was parsed last would silently attach edges to
+    # the wrong type, so collisions resolve to nothing here and the
+    # global pass (which applies the same only-if-unique rule) decides.
+    _sf_names = {}
+    for e in entities:
+        if e.kind in ('class', 'struct', 'interface'):
+            _sf_names.setdefault(e.name, set()).add(e.qualified_name)
+    same_file_index = {name: next(iter(qns))
+                       for name, qns in _sf_names.items() if len(qns) == 1}
     # Short names of same-file abstract types (interface or ABC). An edge
     # into one of these is `implements`; into a concrete class, `inherits`.
     same_file_abstract = {e.name for e in entities
@@ -675,6 +703,8 @@ def parse_file(file_path):
     seen_depends = set()  # dedupe (source_qname, target_name) per file
     for _idx, caps in QueryCursor(_METHOD_IN_CLASS_QUERY).matches(root):
         decl = caps['decl'][0]
+        if _inside_function_body(decl):
+            continue          # locals are body-call territory, not signatures
         name_node = caps['name'][0]
         raw_name = name_node.text.decode()
         in_class = any(a in ('class_specifier', 'struct_specifier')
@@ -768,7 +798,10 @@ def _ancestor_types(node):
 # Any edit to parse_file / parse_sch_file / extract_aliases /
 # classify_field_type / _refine_class_kinds should bump this.
 # v4: body-call depends edges (locals / news / casts / scope access).
-PARSER_VERSION = 4
+# v5: locals-in-bodies no longer become method entities; same-file
+#     short-name collisions resolve to nothing instead of last-wins;
+#     alias expansion re-judges the ownership kind.
+PARSER_VERSION = 5
 
 
 _CPP_EXTS = {'.h', '.hxx', '.hpp', '.cxx', '.cpp', '.c'}
@@ -932,6 +965,23 @@ def _resolve_alias_chain(alias_map, name, _depth=0):
     return inner
 
 
+def _alias_kind(alias_map, name, _depth=0):
+    """The ownership kind hidden behind an alias: walk the chain and let
+    the OUTERMOST wrapper decide (`using P = FooPtr; using FooPtr = Foo*`
+    → associates). A bare-name hop (`using V = Foo`) carries no wrapper
+    signal, so keep walking; returns None when the whole chain is bare —
+    the caller's original judgement then stands."""
+    if _depth > 8 or name not in alias_map:
+        return None
+    text = alias_map[name].strip()
+    bare = ('<' not in text and not text.rstrip().endswith('*')
+            and '&' not in text)
+    if not bare:
+        judged = classify_field_type(text)
+        return judged[0] if judged else None
+    return _alias_kind(alias_map, text.split('::')[-1], _depth + 1)
+
+
 # Directory name fragments that mark vendored / third-party code we
 # don't want polluting the graph (spdlog bundles all of fmt here).
 _VENDOR_DIRS = ('bundled', 'third_party', 'thirdparty', 'external',
@@ -1054,6 +1104,14 @@ def parse_project(root_dir, exclude_vendored=True, cache=None, workers=None):
     # someone shares only .cxx files). Materialize placeholder class
     # entities for those parent_qnames so the rest of the graph can
     # treat them as first-class participants.
+    # Scanned namespaces are already in known_qnames (the namespace
+    # entity carries that qualified_name), so `void util::init()` never
+    # promotes a phantom when `namespace util` appears ANYWHERE in the
+    # scanned set. When it appears nowhere, "method of unseen class" vs
+    # "free function in unseen namespace" is genuinely undecidable from
+    # one .cxx — we promote, and the phantom flag + report exclusion
+    # bound the damage. (An earlier comment promised a smarter guard;
+    # there is no decidable one, so this states the honest rule.)
     known_qnames = {e.qualified_name for e in all_entities}
     needed = {}
     for e in all_entities:
@@ -1061,8 +1119,6 @@ def parse_project(root_dir, exclude_vendored=True, cache=None, workers=None):
             continue
         if e.parent_qname in known_qnames:
             continue
-        # Don't promote a namespace-only parent — only when it looks
-        # like a class (ends with an identifier that has methods).
         needed.setdefault(e.parent_qname, e.file_path)
     for pqname, file_path in needed.items():
         all_entities.append(Entity(
@@ -1091,6 +1147,16 @@ def parse_project(root_dir, exclude_vendored=True, cache=None, workers=None):
                 continue        # alias → primitive/std: not a class edge
             rel.attrs['alias_from'] = rel.target_name
             rel.target_name = resolved
+            # Re-judge the ownership KIND from the alias's real type text.
+            # classify_field_type originally saw only the bare alias name
+            # (`sink_ptr m_sink;` → composes by default), but the alias may
+            # hide a wrapper: `using sink_ptr = shared_ptr<sink>` is
+            # associates, not composes. Field-kind edges only — a `depends`
+            # from a signature stays a depends whatever the alias wraps.
+            if rel.kind in ('composes', 'aggregates', 'associates'):
+                new_kind = _alias_kind(alias_map, rel.attrs['alias_from'])
+                if new_kind and new_kind != rel.kind:
+                    rel.kind = new_kind
             alias_expanded += 1
         surviving.append(rel)
     all_relationships = surviving
@@ -1139,8 +1205,11 @@ def parse_project(root_dir, exclude_vendored=True, cache=None, workers=None):
             retagged += 1
 
     return all_entities, all_relationships, {
-        'files_parsed': sum(1 for p in root.rglob('*')
-                            if p.is_file() and p.suffix in _ALL_EXTS),
+        # Files that actually went through the parser (cache hit or miss)
+        # — NOT a re-walk of the tree, which would count vendored-skipped
+        # and parse-failed files as parsed.
+        'files_parsed': cache_hits + cache_misses,
+        'skipped_vendored': skipped_vendored,
         'entities': len(all_entities),
         'relationships': len(all_relationships),
         'resolved_cross_file': resolved_count,

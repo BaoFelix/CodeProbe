@@ -87,7 +87,9 @@ class ScannerAgent(BaseAgent):
               f"files={stats['files_parsed']}")
         print(f"  ✓ resolved cross-file: {stats['resolved_cross_file']}, "
               f"aliases expanded: {stats['alias_edges_expanded']}")
-        print(f"  ✓ cache: {stats['cache_hits']} hits, {stats['cache_misses']} misses")
+        print(f"  ✓ cache: {stats['cache_hits']} hits, {stats['cache_misses']} misses"
+              + (f", vendored skipped: {stats['skipped_vendored']}"
+                 if stats.get('skipped_vendored') else ""))
         print(f"  ✓ style: {style}" + (f" — {note[:80]}…" if note else ""))
         print(f"  ✓ top orchestrator candidate: {orchestrator}")
 
