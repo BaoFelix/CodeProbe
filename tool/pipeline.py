@@ -136,8 +136,11 @@ class Pipeline:
 
         self.db.ensure_tables()
 
-        if from_step:
-            self._reset_from_step(from_step)
+        if from_step and not self._reset_from_step(from_step):
+            # Invalid --from value: abort loudly. Continuing would skip
+            # both steps as "already exists" and end with a summary that
+            # looks like a successful re-run the user never asked for.
+            return False
 
         # === Step 1: Scan ===
         print(f"\n{'='*60}")

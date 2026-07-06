@@ -2,7 +2,8 @@
 config.py — Configuration
 ═══════════════════════════════════════
 Central management of paths, LLM backends, and API keys.
-Priority: .env file > environment variables > defaults.
+Priority: environment variables > .env file > defaults
+(.env only fills keys the real environment hasn't set).
 ═══════════════════════════════════════
 """
 from pathlib import Path
@@ -24,12 +25,16 @@ if _ENV_FILE.exists():
                 os.environ[key] = value
 
 # ─── Project paths ───────────────────────────────────────────────
+# Everything is anchored at PROJECT_ROOT, never the CWD: an external MCP
+# host may launch us from an arbitrary directory, and CWD-relative paths
+# would silently miss the DB / skills / default sources with no error.
 PROJECT_ROOT = Path(__file__).parent.parent
 DB_PATH = PROJECT_ROOT / "refactor.db"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+SKILLS_DIR = PROJECT_ROOT / "skills"
 
 # ─── Source path ──────────────────────────────────────────────
-SOURCE_ROOT = Path("test_src")
+SOURCE_ROOT = PROJECT_ROOT / "test_src"
 
 # ─── LLM backend config ────────────────────────────────────────────
 # LLM_API_FORMAT determines request format:

@@ -85,13 +85,20 @@ def _by_community(classes, relationships):
 
 def _class_matches(cls, patterns):
     """A class belongs to a group if any pattern globs its file path,
-    short name, or qualified name."""
+    short name, or qualified name.
+
+    Users write path patterns relative to their source tree ('ui/**'),
+    but scans store ABSOLUTE paths — so path-like patterns also match as
+    a '*/'-anchored suffix. The '/' anchor keeps it precise: '*/ui/**'
+    matches '/proj/ui/View.h' but never 'gui/View.h'."""
     qn = cls["qualified_name"]
     short = qn.split("::")[-1]
     fp = cls.get("file_path") or ""
     for p in patterns:
         if fnmatch.fnmatch(fp, p) or fnmatch.fnmatch(short, p) \
                 or fnmatch.fnmatch(qn, p):
+            return True
+        if "/" in p and fnmatch.fnmatch(fp, "*/" + p):
             return True
     return False
 

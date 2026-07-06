@@ -37,8 +37,10 @@ from .model import Entity, Relationship
 
 
 # ── Skill override ─────────────────────────────────────────────
+# Anchored at the project's skills/ dir, not the CWD — an external MCP
+# host may launch this process from an arbitrary directory.
 
-_SKILL_DIR = Path('skills')
+from .config import SKILLS_DIR as _SKILL_DIR
 
 
 def _load_user_override():
@@ -157,12 +159,19 @@ def _format_subtree_summaries(subtree_results):
 
 # ── Tree assembly ──────────────────────────────────────────────
 
-def _collect_subtree(C, label, root):
-    """All condensed node labels reachable from a forest root, inclusive."""
-    members = {label[root]}
+def _collect_subtree(C, root):
+    """All ORIGINAL node names reachable from a forest root, inclusive.
+
+    Reads the condensation's own 'members' sets instead of parsing the
+    display labels: a cluster label carries SHORT names ('cluster(A, B)'),
+    and re-parsing those used to silently drop every namespaced class
+    (Garage::Workshop became an unknown 'Workshop') from the review.
+    Members are real (possibly folded-representative) qualified names.
+    """
+    names = set(C.nodes[root]['members'])
     for n in nx.descendants(C, root):
-        members.add(label[n])
-    return members
+        names.update(C.nodes[n]['members'])
+    return names
 
 
 def _expand_to_concrete(folded_names, rep_map):
@@ -172,12 +181,8 @@ def _expand_to_concrete(folded_names, rep_map):
     for child, par in rep_map.items():
         inverse.setdefault(par, set()).add(child)
     for n in folded_names:
-        if n.startswith('cluster('):
-            for x in re.findall(r'[A-Za-z_][\w:]*', n[8:-1]):
-                concrete.add(x)
-        else:
-            concrete.add(n)
-            concrete.update(inverse.get(n, set()))
+        concrete.add(n)
+        concrete.update(inverse.get(n, set()))
     return concrete
 
 
@@ -235,7 +240,7 @@ class DesignCriticAgent(BaseAgent):
         print(f"  [pass 1] {len(roots)} subtree(s) to analyze…")
         subtree_results = []
         for root in roots:
-            folded_names = _collect_subtree(C, label, root)
+            folded_names = _collect_subtree(C, root)
             concrete_qnames = _expand_to_concrete(folded_names, rep_map)
             classes = [ent_by_qname[q] for q in concrete_qnames
                        if q in ent_by_qname]

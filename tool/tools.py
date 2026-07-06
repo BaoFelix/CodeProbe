@@ -258,11 +258,13 @@ def _llm_ready(ctx):
 def _load_arch_skill():
     """Read the user's plain-language architecture rules, if present.
     Only a file named exactly `architecture.md` counts — the shipped
-    `architecture.example.md` template is deliberately not loaded."""
-    skills = Path("skills")
-    if not skills.is_dir():
+    `architecture.example.md` template is deliberately not loaded.
+    Anchored at the project's skills/ dir (NOT the CWD — an MCP host may
+    launch us from anywhere)."""
+    from .config import SKILLS_DIR
+    if not SKILLS_DIR.is_dir():
         return None
-    for p in skills.rglob("architecture.md"):
+    for p in SKILLS_DIR.rglob("architecture.md"):
         try:
             return p.read_text(encoding="utf-8")
         except OSError:

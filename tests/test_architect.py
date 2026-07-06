@@ -39,6 +39,18 @@ class TestModuleBuilder:
         assert mg.member_index == {"AppView": "UI", "DbConn": "Infra"}
         assert mg.strategy == "explicit"
 
+    def test_relative_path_patterns_match_absolute_paths(self):
+        # scans store absolute paths; user patterns are tree-relative —
+        # 'ui/**' must match '/abs/proj/ui/View.h' but never 'gui/'.
+        classes = [
+            {"qualified_name": "AppView", "file_path": "/abs/proj/ui/AppView.hxx"},
+            {"qualified_name": "GuiHack", "file_path": "/abs/proj/gui/GuiHack.hxx"},
+        ]
+        groups = [Group("UI", ["ui/**"])]
+        mg = ModuleBuilder.build(classes, [], groups=groups)
+        assert mg.member_index["AppView"] == "UI"
+        assert mg.member_index["GuiHack"] == "(unassigned)"
+
     def test_edges_aggregate_weight_kinds_evidence(self):
         classes = [make_class("A1", "A"), make_class("B1", "B")]
         rels = [make_rel("A1", "B1", "depends", "a.hxx", 1),
