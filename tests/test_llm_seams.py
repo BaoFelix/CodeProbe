@@ -100,6 +100,56 @@ class TestToolUseParsing:
         assert LLMClient._parse_args({"a": 1}) == {"a": 1}
 
 
+class TestBatchGenerateResilience:
+    def test_fallback_answer_never_poisons_primary_cache(self, tmp_path):
+        # A fallback model's answer must NOT be cached under the primary
+        # model's key — that would serve the weaker answer forever.
+        from tool.db import DBManager
+        db = DBManager(tmp_path / "c.db")
+        db.ensure_tables()
+        llm = LLMClient(api_url="http://x", api_key="k", model="primary",
+                        api_format="openai", cache=db)
+
+        def fake_api(prompt, system_prompt="", model_override=None):
+            llm._answered_by = "backup"     # simulate 429 → fallback answered
+            return "weak answer"
+        llm._api_call_openai = fake_api
+        assert llm.generate("q") == "weak answer"
+        key = llm._prompt_hash("q", "")
+        assert db.llm_cache_get(key, "primary") is None    # not poisoned
+
+    def test_primary_answer_is_cached(self, tmp_path):
+        from tool.db import DBManager
+        db = DBManager(tmp_path / "c.db")
+        db.ensure_tables()
+        llm = LLMClient(api_url="http://x", api_key="k", model="primary",
+                        api_format="openai", cache=db)
+
+        def fake_api(prompt, system_prompt="", model_override=None):
+            llm._answered_by = "primary"
+            return "good answer"
+        llm._api_call_openai = fake_api
+        llm.generate("q")
+        assert db.llm_cache_get(llm._prompt_hash("q", ""), "primary") \
+            == "good answer"
+
+    def test_malformed_200_degrades_not_crashes(self):
+        # empty choices list from a filtering proxy must not kill the loop
+        llm = make_openai({"choices": []})
+        r = llm.generate_with_tools([], [])
+        assert "LLM error" in r.text and not r.tool_calls
+
+    def test_error_message_carries_text_in_assistant_content(self):
+        # empty assistant content poisons the next Anthropic turn — the
+        # error text must ride in the message itself
+        llm = LLMClient(api_url="http://x", api_key="k", model="m",
+                        api_format="anthropic")
+        llm._post = lambda u, b, h: (None, "network: down", None)
+        r = llm.generate_with_tools([], [])
+        assert r.assistant_message["content"]          # non-empty
+        assert "LLM error" in r.assistant_message["content"]
+
+
 class TestRuleCompiler:
     GOOD = ('{"groups":[{"name":"UI","match":["*View"]}],'
             '"rules":[{"kind":"forbid_dependency","from":"UI","to":"DB",'

@@ -115,13 +115,21 @@ class LLMClient:
                 pass    # cache failure must not block the call
 
         # ── miss → real API call ─────────────────────────
+        # _answered_by records which model actually produced the text —
+        # a 429 may have walked the fallback chain mid-call.
+        self._answered_by = self.model
         if self.api_format == "anthropic":
             response = self._api_call_anthropic(prompt, system_prompt)
         else:
             response = self._api_call_openai(prompt, system_prompt)
 
         # ── write through ────────────────────────────────
+        # Only cache answers from the PRIMARY model: a fallback model's
+        # answer stored under the primary's key would be served forever
+        # as if the primary had said it — permanent cache poisoning for
+        # one rate-limited moment.
         if (response is not None
+                and self._answered_by == self.model
                 and self.cache is not None
                 and not self.cache_disabled):
             try:
@@ -202,9 +210,14 @@ class LLMClient:
 
     @staticmethod
     def _tool_error(err):
-        return LLMResponse(text=f"[LLM error: {err}]", tool_calls=[],
+        # The error text goes into the assistant message too: an EMPTY
+        # assistant content appended to history breaks the next Anthropic
+        # turn (empty content blocks are rejected), so one transient error
+        # would poison every later turn of the conversation.
+        text = f"[LLM error: {err}]"
+        return LLMResponse(text=text, tool_calls=[],
                            assistant_message={"role": "assistant",
-                                              "content": ""})
+                                              "content": text})
 
     def _tools_call_openai(self, messages, tools, system_prompt, model):
         msgs = list(messages)
@@ -228,10 +241,15 @@ class LLMClient:
                 return self._tools_call_openai(messages, tools, system_prompt, nxt)
         if err:
             return self._tool_error(err)
-        msg = data["choices"][0]["message"]
-        calls = [ToolCall(id=c["id"], name=c["function"]["name"],
-                          args=self._parse_args(c["function"].get("arguments")))
-                 for c in (msg.get("tool_calls") or [])]
+        try:
+            # A 200 with an empty choices list (content filtering, proxy
+            # quirks) must degrade like any other error, not kill the REPL.
+            msg = data["choices"][0]["message"]
+            calls = [ToolCall(id=c["id"], name=c["function"]["name"],
+                              args=self._parse_args(c["function"].get("arguments")))
+                     for c in (msg.get("tool_calls") or [])]
+        except (KeyError, IndexError, TypeError) as e:
+            return self._tool_error(f"malformed response: {e}")
         return LLMResponse(text=msg.get("content") or "",
                            tool_calls=calls, assistant_message=msg)
 
@@ -257,11 +275,15 @@ class LLMClient:
                                                   system_prompt, nxt)
         if err:
             return self._tool_error(err)
-        blocks = data.get("content", [])
-        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-        calls = [ToolCall(id=b["id"], name=b["name"],
-                          args=self._parse_args(b.get("input")))
-                 for b in blocks if b.get("type") == "tool_use"]
+        try:
+            blocks = data.get("content", [])
+            text = "".join(b.get("text", "") for b in blocks
+                           if b.get("type") == "text")
+            calls = [ToolCall(id=b["id"], name=b["name"],
+                              args=self._parse_args(b.get("input")))
+                     for b in blocks if b.get("type") == "tool_use"]
+        except (KeyError, TypeError) as e:
+            return self._tool_error(f"malformed response: {e}")
         return LLMResponse(text=text, tool_calls=calls,
                            assistant_message={"role": "assistant",
                                               "content": blocks})
@@ -311,6 +333,7 @@ class LLMClient:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
                 content = data["choices"][0]["message"]["content"]
+                self._answered_by = model      # may be a fallback model
                 tokens = data.get("usage", {})
                 if tokens:
                     print(f"    ✓ Got response (prompt={tokens.get('prompt_tokens','?')}"
@@ -352,9 +375,11 @@ class LLMClient:
 
     # ─── Anthropic Messages API Backend ──────────────────────
 
-    def _api_call_anthropic(self, prompt, system_prompt=""):
+    def _api_call_anthropic(self, prompt, system_prompt="", model_override=None):
         """
         Anthropic mode: POST to Anthropic Messages API.
+        Auto-fallback to next model in chain on 429 rate limit — same
+        resilience the OpenAI-format path has always had.
 
         POST /v1/messages
         {
@@ -371,8 +396,9 @@ class LLMClient:
             print("    $env:LLM_API_KEY = 'sk-ant-...'")
             return None
 
+        model = model_override or self.model
         body_dict = {
-            "model": self.model,
+            "model": model,
             "max_tokens": 4096,
             "messages": [{"role": "user", "content": prompt}],
         }
@@ -394,11 +420,12 @@ class LLMClient:
         )
 
         try:
-            print(f"    → Anthropic API call: {self.model} @ {self.api_url}")
+            print(f"    → Anthropic API call: {model} @ {self.api_url}")
             with urllib.request.urlopen(req, timeout=120) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
                 # Anthropic response format: {"content": [{"type":"text","text":"..."}], "usage": {...}}
                 content = data["content"][0]["text"]
+                self._answered_by = model      # may be a fallback model
                 usage = data.get("usage", {})
                 if usage:
                     print(f"    ✓ Got response (input={usage.get('input_tokens','?')}"
@@ -406,6 +433,13 @@ class LLMClient:
                 return content
         except urllib.error.HTTPError as e:
             error_body = e.read().decode('utf-8', errors='replace')
+            if e.code == 429:
+                next_model = self._next_fallback(model)
+                if next_model:
+                    print(f"  ⚠ {model} rate-limited (429), falling back to {next_model}")
+                    return self._api_call_anthropic(prompt, system_prompt,
+                                                    model_override=next_model)
+                print(f"  ✗ All models rate-limited (429), cannot continue")
             print(f"  ✗ Anthropic API error {e.code}: {error_body[:300]}")
             return None
         except urllib.error.URLError as e:
