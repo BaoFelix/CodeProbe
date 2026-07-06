@@ -6,16 +6,21 @@ implementation of every capability, in the tool registry. Two consumers
 share it:
 
     our own Host (host.py)                       → in-process function calls
-    external hosts (Copilot, Claude Desktop, …)  → these MCP wrappers
+    external hosts (Copilot, Claude Desktop, …)  → this MCP server
 
-So every function below is a thin adapter: a typed signature (that is what
-MCP uses to advertise the parameter schema to callers) plus one run_tool()
-call. No analysis logic lives here — if a wrapper ever grows an `if`, that
-logic belongs in tools.py or a worker instead.
+The wrappers are GENERATED from each ToolSpec's JSON schema rather than
+hand-written. That closes both drift channels structurally: logic can't
+drift (a wrapper is one dispatch call), and the advertised parameter
+schema can't drift either (it *is* the registry schema, reflected into a
+Python signature FastMCP reads). Add a tool to the registry and every
+consumer — Host, MCP, tests — sees it identically, for free.
 
   Install: pip install mcp
   Start:   python run.py mcp-server
 """
+import inspect
+from typing import Optional
+
 try:
     from mcp.server.fastmcp import FastMCP
     MCP_AVAILABLE = True
@@ -25,6 +30,46 @@ except ImportError:
 from .tools import ToolContext, build_registry, run_tool
 
 
+_TYPE_MAP = {"string": str, "integer": int, "boolean": bool, "number": float}
+
+
+def _make_wrapper(spec, dispatch):
+    """Build a function whose signature mirrors spec.parameters exactly.
+
+    FastMCP derives the tool schema it advertises from the function's
+    signature/annotations — so by manufacturing both from the ToolSpec,
+    the wire schema is the registry schema by construction.
+
+    Optional params default to None and are dropped before dispatch, so
+    the HANDLER's own Python defaults stay the single source of default
+    values (e.g. list_classes' limit=200) instead of being duplicated here.
+    """
+    props = spec.parameters.get("properties", {})
+    required = set(spec.parameters.get("required", []))
+    params, annotations = [], {}
+    for name, meta in props.items():
+        base = _TYPE_MAP.get(meta.get("type"), str)
+        if name in required:
+            default, ann = inspect.Parameter.empty, base
+        else:
+            default, ann = None, Optional[base]
+        params.append(inspect.Parameter(
+            name, inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            default=default, annotation=ann))
+        annotations[name] = ann
+
+    def wrapper(**kwargs):
+        given = {k: v for k, v in kwargs.items() if v is not None}
+        return dispatch(spec.name, **given)
+
+    wrapper.__name__ = spec.name
+    wrapper.__doc__ = spec.description
+    wrapper.__signature__ = inspect.Signature(params, return_annotation=str)
+    annotations["return"] = str
+    wrapper.__annotations__ = annotations
+    return wrapper
+
+
 def create_mcp_server():
     """Build the FastMCP server over the shared tool registry.
     Returns the FastMCP instance, or None if mcp isn't installed."""
@@ -32,78 +77,20 @@ def create_mcp_server():
         print("  ✗ MCP package not installed. Run: pip install mcp")
         return None
 
+    # NB: the modern mcp package renamed description= to instructions=;
+    # passing positionally-safe kwargs keeps us working across versions.
     mcp = FastMCP(
         "codeprobe",
-        description="CodeProbe — AI-powered C++ architecture diagnostics")
+        instructions="CodeProbe — AI-powered C++ architecture diagnostics")
 
     ctx = ToolContext.build()
     registry = build_registry(ctx)
 
-    def call(name, **args):
+    def dispatch(name, **args):
         return run_tool(registry, name, args, ctx)
 
-    # ── thin wrappers (signature = the schema MCP advertises) ────────
-
-    @mcp.tool()
-    def scan_source(directory: str = "", force: bool = False) -> str:
-        """Scan a C++ source directory into the DB (entities +
-        relationships). Idempotent: skips if already scanned;
-        force=True rescans."""
-        return call("scan_source", directory=directory, force=force)
-
-    @mcp.tool()
-    def get_overview() -> str:
-        """High-level snapshot: class count, orchestrator, architecture
-        style. Cheap, read-only."""
-        return call("get_overview")
-
-    @mcp.tool()
-    def list_classes(limit: int = 200) -> str:
-        """List qualified names of all classes/structs/interfaces."""
-        return call("list_classes", limit=limit)
-
-    @mcp.tool()
-    def get_relationships(class_qname: str = "", limit: int = 200) -> str:
-        """List relationships (optionally for one class), each with kind
-        and file:line evidence."""
-        return call("get_relationships", class_qname=class_qname, limit=limit)
-
-    @mcp.tool()
-    def architecture_audit(strategy: str = "auto", verify: bool = False) -> str:
-        """Architecture-level health check: module cycles, god modules,
-        inverted dependencies, plus user rules from skills/architecture.md.
-        Deterministic findings with file:line evidence."""
-        return call("architecture_audit", strategy=strategy, verify=verify)
-
-    @mcp.tool()
-    def decoupling_plan(strategy: str = "auto") -> str:
-        """For each module cycle: the cheapest edges to cut, the mechanism
-        (dependency inversion / extract shared base), the exact references
-        to change, and a build-safe refactor order."""
-        return call("decoupling_plan", strategy=strategy)
-
-    @mcp.tool()
-    def design_review(force: bool = False) -> str:
-        """Run the two-pass class-level LLM design review (requires a
-        scan; idempotent unless force=True)."""
-        return call("design_review", force=force)
-
-    @mcp.tool()
-    def get_findings() -> str:
-        """Read stored design-review results (recommendations + pain
-        points). No LLM call."""
-        return call("get_findings")
-
-    @mcp.tool()
-    def query_db(sql: str) -> str:
-        """Read-only SELECT over the DB (tables: entities, relationships,
-        module_info, design_critic_subtree, design_critic_module)."""
-        return call("query_db", sql=sql)
-
-    @mcp.tool()
-    def generate_report() -> str:
-        """Render the self-contained interactive HTML report."""
-        return call("generate_report")
+    for spec in registry.values():
+        mcp.tool()(_make_wrapper(spec, dispatch))
 
     return mcp
 
