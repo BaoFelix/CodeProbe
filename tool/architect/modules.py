@@ -52,10 +52,29 @@ def _by_folder(classes):
 
 
 def _by_namespace(classes):
+    """Group by namespace — but by the first DISTINGUISHING segment, not
+    the raw first one. A whole codebase under a shared top-level namespace
+    (UGS::SimulationPost::*, UGS::CaeSim::CaePost::*) would otherwise
+    collapse into one useless `UGS` module; stripping the common `UGS`
+    prefix yields the real modules `SimulationPost` and `CaeSim`."""
+    ns_of = {c["qualified_name"]: c["qualified_name"].split("::")[:-1]
+             for c in classes}
+    non_empty = [ns for ns in ns_of.values() if ns]
+    common = 0
+    if non_empty:
+        for i in range(min(len(ns) for ns in non_empty)):
+            seg = non_empty[0][i]
+            if all(len(ns) > i and ns[i] == seg for ns in non_empty):
+                common += 1
+            else:
+                break
     idx = {}
-    for c in classes:
-        qn = c["qualified_name"]
-        idx[qn] = qn.split("::")[0] if "::" in qn else "(root)"
+    for qn, ns in ns_of.items():
+        if not ns:
+            idx[qn] = "(root)"
+        else:
+            rest = ns[common:]          # first segment past the shared prefix
+            idx[qn] = rest[0] if rest else ns[-1]
     return idx
 
 

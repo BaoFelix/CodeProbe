@@ -207,6 +207,51 @@ void* Foo::operator new(unsigned long n) { return nullptr; }
         names = {e.name for e in ents if e.kind == "method"}
         assert any("operator" in n for n in names), names
 
+    def test_bare_and_namespaced_duplicates_are_merged(self, tmp_path):
+        # A class declared namespaced in its .hxx, then defined bare in a
+        # .cxx via `using namespace`, must NOT become two classes (a bare
+        # duplicate that pollutes a phantom module). They merge into the
+        # one namespaced class, and the .cxx's edges attach to it.
+        (tmp_path / "Foo.hxx").write_text("""
+namespace N { namespace M {
+    class Widget {};
+    class Foo { public: void bar(); };
+} }
+""")
+        (tmp_path / "Foo.cxx").write_text("""
+#include "Foo.hxx"
+using namespace N::M;
+void Foo::bar() { Widget w; (void)w; }
+""")
+        from tool.ts_parser import parse_project
+        ents, rels, stats = parse_project(str(tmp_path), cache=None)
+        classes = [e for e in ents if e.kind in ("class", "struct", "interface")]
+        names = {e.qualified_name for e in classes}
+        assert "N::M::Foo" in names
+        assert "Foo" not in names                 # bare duplicate merged away
+        assert stats["deduped_bare"] >= 1
+        # the body-call edge is attributed to the namespaced class
+        foo_edges = [r for r in rels if r.source_qname == "N::M::Foo"
+                     and r.target_name == "Widget"]
+        assert foo_edges
+
+    def test_sch_bare_class_merges_and_becomes_real(self, tmp_path):
+        # A .sch schema names a class bare; its .cxx has the namespaced
+        # out-of-line methods (phantom). After merge the class is REAL
+        # (not a hidden phantom) so it appears in the graph/report.
+        (tmp_path / "B.sch").write_text(
+            "class Builder\n{\n    superclass Base\n}\n")
+        (tmp_path / "B.cxx").write_text("""
+namespace N { namespace M {
+    void Builder::go() { }
+} }
+""")
+        from tool.ts_parser import parse_project
+        ents, _, _ = parse_project(str(tmp_path), cache=None)
+        builder = [e for e in ents if e.qualified_name == "N::M::Builder"]
+        assert builder, [e.qualified_name for e in ents]
+        assert not builder[0].attrs.get("phantom")   # real, not hidden
+
     def test_stats_files_parsed_excludes_vendored(self, tmp_path):
         (tmp_path / "a.hxx").write_text("class A {};")
         vend = tmp_path / "third_party"

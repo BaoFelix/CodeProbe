@@ -21,6 +21,19 @@ class TestModuleBuilder:
         assert mg.member_index == {"A1": "A", "B1": "B"}
         assert mg.strategy == "folder"
 
+    def test_namespace_grouping_strips_shared_top_level(self):
+        # Everything under a shared top-level namespace (UGS) must not
+        # collapse into one useless module — group by the first
+        # DISTINGUISHING segment (SimulationPost vs CaeSim).
+        classes = [
+            {"qualified_name": "UGS::SimulationPost::Extractor", "file_path": "a"},
+            {"qualified_name": "UGS::SimulationPost::Locator", "file_path": "b"},
+            {"qualified_name": "UGS::CaeSim::CaePost::Builder", "file_path": "c"},
+        ]
+        mg = ModuleBuilder.build(classes, [], strategy="namespace")
+        assert mg.member_index["UGS::SimulationPost::Extractor"] == "SimulationPost"
+        assert mg.member_index["UGS::CaeSim::CaePost::Builder"] == "CaeSim"
+
     def test_two_unrelated_util_folders_stay_distinct(self):
         # geometry/util and io/util must NOT merge into one phantom "util"
         # module — basename grouping would fabricate cycles/god-modules.

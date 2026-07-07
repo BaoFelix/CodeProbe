@@ -813,7 +813,9 @@ def _ancestor_types(node):
 #     alias expansion re-judges the ownership kind.
 # v6: reject mis-parsed declarator names containing spaces (template free
 #     functions were fabricating methods under a phantom 'std' class).
-PARSER_VERSION = 6
+# v7: merge bare vs namespaced duplicate classes (.cxx `using namespace`
+#     out-of-line methods / .sch schemas) into their namespaced counterpart.
+PARSER_VERSION = 7
 
 
 _CPP_EXTS = {'.h', '.hxx', '.hpp', '.cxx', '.cpp', '.c'}
@@ -1144,6 +1146,57 @@ def parse_project(root_dir, exclude_vendored=True, cache=None, workers=None):
                    'reason': 'declaration not seen, inferred from out-of-line methods'},
         ))
 
+    # ── deduplicate bare vs namespaced classes ──────────────────
+    # The SAME class is often parsed twice: once fully-qualified from its
+    # .hxx (UGS::SimulationPost::Foo), and once BARE from a .cxx that uses
+    # `using namespace` for its out-of-line methods, or from a .sch schema.
+    # Left unmerged, the bare copies form a spurious "(root)" module and
+    # their edges never attach to the real node. Merge each bare class into
+    # its UNIQUE namespaced counterpart (skip when the short name is
+    # ambiguous — safer to leave it than guess).
+    class_kinds = ('class', 'struct', 'interface')
+    by_short = {}
+    for e in all_entities:
+        if e.kind in class_kinds and '::' in e.qualified_name:
+            by_short.setdefault(e.qualified_name.split('::')[-1], []).append(e)
+    rename = {}                       # bare qualified_name -> full qualified_name
+    for e in all_entities:
+        if e.kind in class_kinds and '::' not in e.qualified_name:
+            cands = by_short.get(e.qualified_name, [])
+            if len(cands) == 1:
+                survivor = cands[0]
+                rename[e.qualified_name] = survivor.qualified_name
+                # If the bare copy was REAL (a .sch schema, or a concrete
+                # definition), the survivor must not stay a phantom —
+                # otherwise the report would hide a real class.
+                if not (e.attrs or {}).get('phantom'):
+                    survivor.attrs.pop('phantom', None)
+                    survivor.attrs.pop('reason', None)
+    if rename:
+        deduped_removed = len(rename)
+        all_entities = [e for e in all_entities
+                        if not (e.kind in class_kinds
+                                and e.qualified_name in rename)]
+        for e in all_entities:        # re-home orphaned children
+            if e.parent_qname in rename:
+                e.parent_qname = rename[e.parent_qname]
+        for r in all_relationships:   # redirect edges onto the real node
+            if r.source_qname in rename:
+                r.source_qname = rename[r.source_qname]
+            if r.target_qname in rename:
+                r.target_qname = rename[r.target_qname]
+        seen_edges, merged = set(), []
+        for r in all_relationships:   # the two copies may share edges
+            key = (r.source_qname, r.target_qname or r.target_name, r.kind,
+                   r.evidence_file, r.evidence_line)
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            merged.append(r)
+        all_relationships = merged
+    else:
+        deduped_removed = 0
+
     # ── alias expansion: rewrite relationship targets through aliases ─
     # e.g. target_name 'sink_ptr' → alias chain → 'sink'. If an alias
     # bottoms out at a primitive (level_t = atomic<int>), the edge is
@@ -1222,6 +1275,7 @@ def parse_project(root_dir, exclude_vendored=True, cache=None, workers=None):
         # and parse-failed files as parsed.
         'files_parsed': cache_hits + cache_misses,
         'skipped_vendored': skipped_vendored,
+        'deduped_bare': deduped_removed,
         'entities': len(all_entities),
         'relationships': len(all_relationships),
         'resolved_cross_file': resolved_count,
