@@ -68,7 +68,8 @@ def check_god_module(rule, mg):
                         f"{node}. It is a single point of change for the "
                         f"whole system; consider splitting it or hiding it "
                         f"behind a narrow interface."),
-                modules=[node] + sorted(deps), evidence=ev[:12]))
+                modules=[node] + sorted(deps), evidence=ev[:12],
+                subject=[node]))    # identity = the hub, not its dependents
     return out
 
 

@@ -7,7 +7,7 @@ Tests for every seam where an LLM touches the system — all offline.
   · Verifier: drops LLM-refuted findings; FAIL-OPEN on junk (never hide a
     possible problem because parsing failed).
 """
-from tool.llm import LLMClient, LLMResponse
+from tool.llm import LLMClient
 from tool.architect import RuleCompiler, Verifier, Finding
 from conftest import CannedLLM
 

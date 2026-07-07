@@ -51,6 +51,10 @@ def build_payload(db):
     orchestrator = (db.get_module_info() or {})
     orch_name = _get(orchestrator, 'orchestrator')
     utilities = {n for n in g.nodes if classify_utility(g, n)}
+    # A CRTP core (everyone inherits it, it depends on nothing) matches
+    # the utility shape too — the orchestrator must never render as a
+    # utility, whichever scoring model picked it.
+    utilities.discard(orch_name)
 
     phantoms = {e.qualified_name for e in entities
                 if e.kind in ('class', 'struct', 'interface')

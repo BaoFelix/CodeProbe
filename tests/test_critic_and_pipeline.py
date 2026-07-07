@@ -2,8 +2,6 @@
 Tests for the design-critic subtree assembly and the pipeline guard —
 both found broken/untested by the debt sweep.
 """
-import networkx as nx
-
 from tool.workflow import build_graph, condense
 from tool.design_critic import (_collect_subtree, _expand_to_concrete,
                                 _safe_parse_json, _load_user_override)

@@ -12,7 +12,7 @@ Key insight:
 from pathlib import Path
 
 from .ts_parser import parse_project
-from .workflow import build_graph, score_nodes, classify_utility, detect_style
+from .workflow import build_graph, score_nodes, detect_style
 
 
 class BaseAgent:

@@ -79,6 +79,29 @@ class TestCrtpScoring:
         g = self._base_heavy_graph()
         assert score_nodes(g) == score_nodes(g, style="oop")
 
+    def test_crtp_end_to_end_through_scanner(self, tmp_path):
+        # Synthetic template library big enough to trip detect_style
+        # (>=50 classes, >=20 inherits, <2% abstract): the full
+        # ScannerAgent path must detect 'crtp', switch scoring, and
+        # persist the BASE as the orchestrator — not a leaf.
+        from tool.agents import ScannerAgent
+        from tool.db import DBManager
+        from tool.llm import LLMClient
+        from tool.source_io import SourceReader
+        src = tmp_path / "lib"
+        src.mkdir()
+        body = "class Base { public: void Tick(); };\n" + "\n".join(
+            f"class D{i} : public Base {{ public: void Run{i}(); }};"
+            for i in range(59))
+        (src / "all.hxx").write_text(body)
+        db = DBManager(tmp_path / "t.db")
+        db.ensure_tables()
+        ScannerAgent(llm=LLMClient(cache=db), db=db,
+                     reader=SourceReader(str(src), db=db)).run(str(src))
+        mi = db.get_module_info()
+        assert mi["style"] == "crtp", mi["style"]
+        assert mi["orchestrator"] == "Base", mi["orchestrator"]
+
 
 class TestClassifyUtility:
     def test_sink_with_fan_in_is_utility(self):

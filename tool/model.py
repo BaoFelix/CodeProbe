@@ -15,7 +15,7 @@ from this module.
 Pure data containers: no parsing logic, no DB knowledge. The parser
 produces them; db.py persists them; workflow/report consume them.
 """
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Optional
 import json
 

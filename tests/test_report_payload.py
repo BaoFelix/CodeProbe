@@ -4,8 +4,6 @@ Report data-layer tests — build_payload was the largest untested surface
 debt sweep flagged as silently breakable: phantom exclusion, multi-edge
 collapse to the strongest kind, and payload shape.
 """
-from pathlib import Path
-
 from tool.report.data import build_payload
 from tool.agents import ScannerAgent
 from tool.db import DBManager
@@ -65,3 +63,26 @@ class TestBuildPayload:
     def test_review_section_safe_when_no_review_ran(self, tmp_path):
         payload = build_payload(_scan_fixture(tmp_path))
         assert payload["review"] is not None     # empty-but-valid, no crash
+
+    def test_orchestrator_never_renders_as_utility(self, tmp_path):
+        # A CRTP core matches the utility shape (in>=2, out==0). If the
+        # scorer crowned it orchestrator, the report must not tag the same
+        # node is_util — contradictory rendering.
+        src = tmp_path / "src"
+        src.mkdir()
+        src.joinpath("W.hxx").write_text("""
+class Base { public: void Tick(); };
+class W1 : public Base {};
+class W2 : public Base {};
+""")
+        db = DBManager(tmp_path / "t.db")
+        db.ensure_tables()
+        ScannerAgent(llm=LLMClient(cache=db), db=db,
+                     reader=SourceReader(str(src), db=db)).run(str(src))
+        # force the sink to be the recorded orchestrator (what the CRTP
+        # scorer would do on a big template codebase)
+        db._execute("UPDATE module_info SET orchestrator='Base'")
+        payload = build_payload(db)
+        base = next(n for n in payload["graph"]["nodes"] if n["id"] == "Base")
+        assert base["is_orch"] == 1
+        assert base["is_util"] == 0

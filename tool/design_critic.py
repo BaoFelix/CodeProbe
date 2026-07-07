@@ -14,7 +14,6 @@ prompt template — that's how a user installs their own methodology.
 Otherwise the embedded scattered templates in _critic_phases /
 _critic_lenses are assembled and used.
 """
-from pathlib import Path
 import json
 import re
 
@@ -28,11 +27,7 @@ from ._critic_lenses import (
 from ._critic_phases import (
     SYSTEM_PREAMBLE, SUBTREE_TEMPLATE, MODULE_TEMPLATE,
 )
-from .ts_parser import parse_project  # noqa: F401  (kept for typed imports)
-from .workflow import (
-    build_graph, fold_abstractions, condense, find_roots,
-    dominator_children, score_nodes, classify_utility,
-)
+from .workflow import build_graph, fold_abstractions, condense, find_roots
 from .model import Entity, Relationship
 
 

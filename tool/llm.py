@@ -23,14 +23,13 @@ acceptable answer to a gpt-4o question.
 import hashlib
 import json
 import os
-import time
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
 
 from .config import (
     LLM_API_FORMAT, LLM_API_URL, LLM_API_KEY, LLM_MODEL,
-    LLM_FALLBACK_MODELS, OUTPUTS_DIR
+    LLM_FALLBACK_MODELS
 )
 
 

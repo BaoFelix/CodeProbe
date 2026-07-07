@@ -178,6 +178,35 @@ void Engine::Stop() { }
         assert eng.attrs.get("phantom") is True
         assert eng.kind == "class"
 
+    def test_template_free_function_does_not_fabricate_std_methods(self, tmp_path):
+        # spdlog regression: `template<..> MACRO std::shared_ptr<X> f(...)`
+        # mis-parses into a declarator name spanning the return type —
+        # which fabricated methods under parent 'std', then a phantom
+        # class 'std' that out-scored the real orchestrator.
+        src = tmp_path / "x-inl.h"
+        src.write_text("""
+template<typename Factory>
+SPDLOG_INLINE std::shared_ptr<int> stdout_color_mt(const char* name)
+{
+    return Factory::template create<int>(name);
+}
+""")
+        from tool.ts_parser import parse_file
+        ents, rels = parse_file(str(src))
+        assert not any(e.parent_qname == "std" for e in ents), ents
+        assert not any(" " in e.name for e in ents if e.kind == "method")
+
+    def test_operator_methods_still_survive_the_space_guard(self, tmp_path):
+        src = tmp_path / "op.cxx"
+        src.write_text("""
+bool Foo::operator==(const Foo& o) const { return true; }
+void* Foo::operator new(unsigned long n) { return nullptr; }
+""")
+        from tool.ts_parser import parse_file
+        ents, _ = parse_file(str(src))
+        names = {e.name for e in ents if e.kind == "method"}
+        assert any("operator" in n for n in names), names
+
     def test_stats_files_parsed_excludes_vendored(self, tmp_path):
         (tmp_path / "a.hxx").write_text("class A {};")
         vend = tmp_path / "third_party"

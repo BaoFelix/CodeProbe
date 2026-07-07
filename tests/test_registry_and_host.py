@@ -7,8 +7,6 @@ SQL degrade into messages, never exceptions), scan idempotency (the
 scan-once-then-read-DB behavior), and the loop's mechanics (threading tool
 results back, step ceiling).
 """
-import pytest
-
 from tool.tools import build_registry, tool_schemas, run_tool
 from tool.host import Host, MAX_STEPS
 from conftest import fresh_ctx, ScriptedLLM, tool_step, final_step

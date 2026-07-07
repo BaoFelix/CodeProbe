@@ -555,6 +555,14 @@ def parse_file(file_path):
             continue
         name_node = caps['name'][0]
         raw_name = name_node.text.decode()
+        if ' ' in raw_name and 'operator' not in raw_name:
+            # A real declarator name never contains a space (except
+            # `operator new` etc.). Template free functions like
+            # `template<..> SPDLOG_INLINE std::shared_ptr<X> make(...)`
+            # can mis-parse into a name spanning the return type — on
+            # spdlog that fabricated methods under a phantom class 'std'
+            # that then out-scored the real orchestrator.
+            continue
         parent_qname = _enclosing_container_qname(
             decl, ('class_specifier', 'struct_specifier'))
         if parent_qname is None:
@@ -707,6 +715,8 @@ def parse_file(file_path):
             continue          # locals are body-call territory, not signatures
         name_node = caps['name'][0]
         raw_name = name_node.text.decode()
+        if ' ' in raw_name and 'operator' not in raw_name:
+            continue          # mis-parsed declarator (see entity pass)
         in_class = any(a in ('class_specifier', 'struct_specifier')
                        for a in _ancestor_types(decl))
         if in_class:
@@ -801,7 +811,9 @@ def _ancestor_types(node):
 # v5: locals-in-bodies no longer become method entities; same-file
 #     short-name collisions resolve to nothing instead of last-wins;
 #     alias expansion re-judges the ownership kind.
-PARSER_VERSION = 5
+# v6: reject mis-parsed declarator names containing spaces (template free
+#     functions were fabricating methods under a phantom 'std' class).
+PARSER_VERSION = 6
 
 
 _CPP_EXTS = {'.h', '.hxx', '.hpp', '.cxx', '.cpp', '.c'}

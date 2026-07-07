@@ -24,7 +24,7 @@ Contract (stable — other modules depend on these shapes):
 Every handler returns a plain string — the text fed back to the LLM (or shown
 to the user). Strings keep the contract trivial and provider-agnostic.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 

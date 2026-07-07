@@ -10,11 +10,13 @@ algorithms, no LLM: the plan is computed, not guessed.
 The three ideas, in order:
 
 1. WHICH edges to cut — minimum feedback arc set: the cheapest set of edges
-   whose removal makes the cycle disappear. Edge cost = its weight = how
-   many real class-level references it aggregates (= how much code you must
-   touch). Exact minimum is NP-hard in general, but module cycles are tiny
+   whose removal makes the cycle disappear. Edge cost is KIND-WEIGHTED
+   (_edge_cost): each backing class reference is priced by what severing it
+   means — an inherits reference costs 3× a depends reference — so the
+   optimizer prefers the structurally easier surgery, not just the fewest
+   lines. Exact minimum is NP-hard in general, but module cycles are tiny
    (2–5 modules), so we solve exactly by trying subsets in increasing cost
-   and fall back to a classic greedy (repeatedly drop the lightest edge on
+   and fall back to a classic greedy (repeatedly drop the cheapest edge on
    a remaining cycle) only if a cycle is unusually large.
 
 2. HOW to cut each edge — the prescription. Chosen from the underlying
@@ -29,7 +31,7 @@ The three ideas, in order:
    topological order gives a sequence in which each module only depends on
    already-refactored ones: every step keeps the build green.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import combinations
 
 import networkx as nx

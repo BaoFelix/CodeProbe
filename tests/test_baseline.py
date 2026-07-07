@@ -25,6 +25,38 @@ class TestFindingKey:
         assert _f("god_module", ["H"], line=10).key() \
             == _f("god_module", ["H"], line=999).key()
 
+    def test_god_module_key_stable_when_dependents_grow(self):
+        # god_module's display modules list every dependent; its IDENTITY
+        # is the hub alone. One more dependent must NOT read as a new
+        # violation, or every PR that adds a dependency re-trips CI.
+        day1 = Finding("r", "god_module", "God module: H", "d",
+                       modules=["H", "A", "B", "C"], evidence=["e"],
+                       subject=["H"])
+        day2 = Finding("r", "god_module", "God module: H", "d",
+                       modules=["H", "A", "B", "C", "D"], evidence=["e"],
+                       subject=["H"])
+        assert day1.key() == day2.key() == "god_module:H"
+
+    def test_real_checker_emits_stable_god_key(self):
+        # end-to-end: the actual god_module checker, hub with 3 then 4
+        # dependents — same key both times.
+        from tool.architect import run_architecture_audit
+
+        def world(n_deps):
+            classes = [{"qualified_name": f"{m}1",
+                        "file_path": f"src/{m}/{m}1.hxx"}
+                       for m in list("ABCDE")[:n_deps]] + \
+                      [{"qualified_name": "H1", "file_path": "src/H/H1.hxx"}]
+            rels = [{"source_qname": f"{m}1", "target_qname": "H1",
+                     "target_name": "H1", "kind": "depends",
+                     "evidence_file": "x", "evidence_line": 1}
+                    for m in list("ABCDE")[:n_deps]]
+            f, _ = run_architecture_audit(classes, rels, strategy="folder")
+            return [x for x in f if x.kind == "god_module"]
+
+        (g4,), (g5,) = world(4), world(5)
+        assert g4.key() == g5.key() == "god_module:H"
+
 
 class TestFreezeAndCheck:
     def test_freeze_then_no_new(self, tmp_path):
