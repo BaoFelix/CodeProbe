@@ -33,7 +33,8 @@ class Alpha { Beta m_b; Beta* m_pb; };
 class TestBuildPayload:
     def test_payload_shape(self, tmp_path):
         payload = build_payload(_scan_fixture(tmp_path))
-        assert set(payload) == {"summary", "graph", "arch", "review"}
+        assert set(payload) == {"summary", "arch_graph", "graph", "arch",
+                                "review"}
         assert payload["summary"]["class_count"] == 3   # Alpha, Beta, Ghost
 
     def test_phantom_excluded_from_graph_and_arch(self, tmp_path):
