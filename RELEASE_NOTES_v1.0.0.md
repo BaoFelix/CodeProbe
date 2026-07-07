@@ -31,10 +31,12 @@ architecture plus an LLM design review.
 - Methodology fully overridable by dropping `skills/design_critic.md`.
 - OpenAI-compatible and Anthropic backends; automatic 429 fallback chain;
   prompt-hash response cache (unchanged re-runs are free).
-- Optional: scanning and the report work entirely offline.
+- Optional: scanning, the audit, and report generation work entirely
+  offline (the report's interactive diagram loads its graph library from
+  a CDN; the tree and review sections render without it).
 
 ### Interactive HTML report
-- One self-contained file, no server: workflow tree, UML relationship
+- One single file, no server: workflow tree, UML relationship
   diagram, design review.
 - Diagram lays out once (cose-bilkent) and never re-shuffles; expand /
   collapse only toggles visibility and animates the camera. Nodes are
@@ -57,14 +59,13 @@ python run.py report          # → outputs/report.html
 
 ## Documentation
 
-- `architecture.md` — full design rationale: data flow, module map, the
-  six relationships, ten design decisions with rejected alternatives,
-  measured performance, known limits.
 - `README.md` — install, commands, configuration.
 
 ## Known limits
 
-- Method bodies are not analyzed; relationships come from signatures and
+- Method bodies are mined for type references only (locals, news, casts,
+  scope access — `via: body_call` edges); call-order and dataflow are not
+  modeled. Other relationships come from signatures and
   fields.
 - Template instantiations are not expanded (CRTP/metaprogramming is
   detected and warned about, not deeply modeled).

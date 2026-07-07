@@ -10,7 +10,12 @@ TABLES
   entities              every named thing (class/method/field/...)
                         keyed by qualified_name; parent_qname is a
                         STRING not a foreign key — bulk insert needs
-                        no id lookups and debugging stays readable
+                        no id lookups and debugging stays readable.
+                        KNOWN TRADE-OFF: UNIQUE(qualified_name, kind)
+                        collapses C++ method overloads to one row (last
+                        parsed wins) — acceptable because downstream
+                        consumers care about names/ownership, not arity;
+                        widening the key would need a table rebuild
   relationships         one row per evidence: the same class pair can
                         have multiple rows of different kinds (that
                         multi-edge richness is a core design feature)

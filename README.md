@@ -20,13 +20,15 @@ top-down, and ships everything as one interactive HTML report.
   folding, architecture style detection (OOP / mixed / CRTP with warning).
 - **Two-pass LLM design review** — per-subtree analysis then module-level
   synthesis; methodology is user-overridable via `skills/design_critic.md`.
-- **Interactive HTML report** — one self-contained file: workflow tree,
+- **Interactive HTML report** — one single file, no server: workflow tree,
   draggable UML relationship diagram (layout once, camera animates), and
-  the design review. No server needed.
+  the design review. Graph libraries load from a CDN; offline, the tree
+  and review still render and the diagram shows a clear notice.
 - **Fast re-runs** — parse cache (~22× on re-scan), multiprocess first
   scan, prompt-hash LLM cache (re-running an unchanged review is free).
 - **Multiple LLM backends** — OpenAI-compatible APIs (GitHub Models etc.)
-  and Anthropic Claude. Scanning and reporting work fully offline.
+  and Anthropic Claude. Scanning, the architecture audit, and the
+  report data all work fully offline (only the report's diagram needs CDN).
 
 ## Quick Start
 
@@ -50,7 +52,8 @@ python run.py report         # → outputs/report.html, open in any browser
 | Command | Description |
 |---------|-------------|
 | `init` | Initialize / reset the database |
-| `analyze <path>` | Fixed pipeline: scan → design review. `<path>` is a directory or a single header file |
+| `analyze <path>` | Fixed pipeline: scan → design review. `<path>` is a directory (a file argument scans its parent directory) |
+| `audit [path]` | Architecture audit + decoupling plan — deterministic, **no LLM key needed** |
 | `chat` | Talk to the codebase — an agentic loop that picks tools from your question (needs an LLM API key) |
 | `status` | Show analysis progress dashboard |
 | `report` | Generate the interactive HTML report |
@@ -76,8 +79,8 @@ Two altitudes, picked by your question:
   (minimum feedback set), the mechanism (dependency inversion / extract
   shared base), the exact `file:line` references to change, and a
   build-safe refactor order. All of it is deterministic (graph algorithms;
-  every finding carries evidence); the LLM only explains it. Runs even
-  without an API key via the built-in checks.
+  every finding carries evidence); the LLM only explains it. For a
+  key-free run of the same checks use `python run.py audit <path>`.
 - **Class level** — the two-pass design review (per-class critique).
 
 ### Options
@@ -88,7 +91,7 @@ Two altitudes, picked by your question:
 
 ### Supported file formats
 
-`.hxx` `.h` `.hpp` (headers) · `.cxx` `.cpp` (implementations) · `.sch`
+`.hxx` `.h` `.hpp` (headers) · `.cxx` `.cpp` `.c` (implementations) · `.sch`
 (schema DSL, minimal regex parser). Vendored/bundled/external directories
 are excluded automatically.
 
@@ -138,8 +141,9 @@ Useful environment switches:
 - `LLM_NO_CACHE=1` — bypass the LLM response cache (useful while tuning
   prompts).
 
-The LLM key is only needed for the design review step; scanning,
-architecture derivation, and the HTML report all run offline.
+The LLM key is only needed for the design review and `chat`; scanning,
+the `audit` command, architecture derivation, and the HTML report all
+run offline.
 
 ## Customizing
 

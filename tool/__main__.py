@@ -33,6 +33,20 @@ def main():
         run_chat()
         return
 
+    # audit: the deterministic architecture check + decoupling plan.
+    # Deliberately key-free — this is the moat, runnable with zero LLM.
+    if cmd == 'audit':
+        from .tools import ToolContext, build_registry, run_tool
+        ctx = ToolContext.build(args[1] if len(args) > 1 else None)
+        registry = build_registry(ctx)
+        scan = run_tool(registry, 'scan_source',
+                        {'directory': args[1] if len(args) > 1 else ''}, ctx)
+        print(f"  {scan}\n")
+        print(run_tool(registry, 'architecture_audit', {}, ctx))
+        print()
+        print(run_tool(registry, 'decoupling_plan', {}, ctx))
+        return
+
     if cmd == 'help':
         _print_usage()
         return
@@ -68,23 +82,29 @@ Usage: python run.py <command> [options]
 Commands:
   init                    Initialize project (create DB tables)
   analyze <path>          Full pipeline (scan → design review)
-                          <path> = directory or .hxx/.sch file
-                          Supported formats: .hxx, .h, .hpp, .cxx, .cpp, .sch
+                          <path> = directory, or a file (its parent
+                          directory is scanned)
+                          Formats: .hxx .h .hpp .cxx .cpp .c .sch
+  audit [path]            Architecture audit + decoupling plan —
+                          deterministic, needs NO LLM key
   status                  Show analysis progress dashboard
   report                  Generate the interactive HTML report
   chat                    Talk to the codebase (agentic; needs LLM API)
+  mcp-server              Run as an MCP server for external AI hosts
+                          (pip install mcp)
 
 Options:
   --from=STEP             Re-run from step: scan or review
 
 Workflow:
   python run.py init                              # first time setup
+  python run.py audit src/                        # key-free architecture check
   python run.py analyze test_src/                 # scan + design review
   python run.py analyze test_src/ --from=review   # re-run the design review
   python run.py report                            # generate HTML report
 
-The design review step needs LLM API access — configure .env
-(see .env.example). Scanning and the report work without it.
+The design review and chat need LLM API access — configure .env
+(see .env.example). Scanning, audit, and the report work without it.
 """)
 
 

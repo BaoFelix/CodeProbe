@@ -5,7 +5,8 @@ Usage: python run.py <command> [args]
 
 Quick start:
   python run.py init                  Reset DB (fresh start)
-  python run.py analyze test_src/     Full pipeline: scan → arch → resp → design
+  python run.py analyze test_src/     Full pipeline: scan → design review
+  python run.py audit test_src/       Architecture audit (no LLM key needed)
   python run.py report                Generate HTML report
 """
 import sys

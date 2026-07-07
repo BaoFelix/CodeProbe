@@ -31,7 +31,7 @@ ENTITY_KINDS = {'class', 'struct', 'interface', 'enum',
 # same edge kind rather than introducing a new one.
 RELATION_KINDS = ('depends',      # Lv-0  signature param/return OR body call
                   'associates',   # Lv-1  raw pointer / shared_ptr field
-                  'implements',   # Lv-2  inherits an interface (I-prefixed / pure virtual)
+                  'implements',   # Lv-2  inherits a pure-virtual interface (shape-based)
                   'aggregates',   # Lv-3  container of pointers (vector<X*>)
                   'composes',     # Lv-4  value field / unique_ptr field
                   'inherits')     # Lv-5  class : public Base

@@ -27,11 +27,13 @@ see `✓ Using user override skill` in the analyze output.
 ```
 skills/
 ├── README.md                  ← this file
-├── design_critic.example.md   ← copy this to design_critic.md and edit
-└── design_critic.md           ← YOUR override (loaded automatically)
+├── design_critic.example.md   ← copy to design_critic.md and edit
+├── design_critic.md           ← YOUR review methodology (auto-loaded)
+├── architecture.example.md    ← copy to architecture.md and edit
+└── architecture.md            ← YOUR architecture rules (auto-loaded)
 ```
 
-> Only `design_critic.md` is loaded. The `.example.md` template is ignored,
+> Only `design_critic.md` / `architecture.md` are loaded. The `.example.md` templates are ignored,
 > so it's safe to keep around as a reference.
 
 ## Writing your override
