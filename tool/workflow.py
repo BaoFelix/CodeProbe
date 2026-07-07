@@ -133,15 +133,24 @@ def _reach_counts(g):
     return counts
 
 
-def score_nodes(g):
-    """Score every node for its 'orchestrator-ness'.
+def score_nodes(g, style='oop'):
+    """Score every node for its 'core-ness', and return
+    {qname: {'out', 'in', 'reach', 'score'}}.
 
-    Orchestrator signature: high weighted out-degree (coordinates many),
-    low in-degree (rarely depended upon), large reachable set (owns a lot
-    of downstream work).
+    Two scoring models, selected by architecture style (detect_style):
 
-    Returns {qname: {'out', 'in', 'reach', 'score'}}.
+    - OOP (default): the core is a COORDINATOR — high weighted out-degree
+      (calls into many), low in-degree (rarely depended upon), large
+      reachable set (owns a lot of downstream work).
+
+    - CRTP / template-metaprogramming: the core is a BASE class everyone
+      builds on — the OOP signature is inverted, so we score the mirror
+      image (see _score_crtp). Without this, detect_style could only warn
+      that the top-scored 'orchestrator' was meaningless; now the ranking
+      is actually right on that world too.
     """
+    if style == 'crtp':
+        return _score_crtp(g)
     reach_of = _reach_counts(g)            # one pass, not per-node BFS
     scores = {}
     for n in g.nodes:
@@ -155,6 +164,32 @@ def score_nodes(g):
             'out': round(out_w, 2),
             'in': round(in_w, 2),
             'reach': reach,
+            'score': round(score, 2),
+        }
+    return scores
+
+
+def _score_crtp(g):
+    """CRTP scoring: the core is the most built-upon BASE class.
+
+    Mirror of the OOP formula. 'reach' becomes the REVERSE-reachable set —
+    how many classes (transitively) build on this node — computed by
+    running the same one-pass sweep on the reversed graph. Reward high
+    in-degree and large reverse-reach; penalize depending on others. So a
+    CRTP base (everyone inherits it, it inherits nothing) rises to the top
+    where the OOP formula had sunk it to a utility.
+    """
+    ancestors_of = _reach_counts(g.reverse(copy=True))   # who builds on n
+    scores = {}
+    for n in g.nodes:
+        out_w = g.out_degree(n, weight='weight')
+        in_w = g.in_degree(n, weight='weight')
+        built_on = ancestors_of[n]
+        score = in_w + 0.5 * built_on - 0.8 * out_w
+        scores[n] = {
+            'out': round(out_w, 2),
+            'in': round(in_w, 2),
+            'reach': built_on,       # reverse reach in CRTP mode
             'score': round(score, 2),
         }
     return scores
@@ -203,12 +238,10 @@ def detect_style(entities, relationships, g):
             return ('crtp',
                     f"CRTP / template-metaprogramming style detected "
                     f"({abstractions}/{classes} abstract, {inherits_edges} inherits). "
-                    "Default orchestrator scoring assumes traditional OOP "
-                    "(high out-degree = coordinator). In CRTP code the "
-                    "architectural cores are base classes — high in-degree, "
-                    "low out-degree — so they appear as utilities under the "
-                    "default scoring. Inspect the most-inherited base "
-                    "classes directly instead of the top-scored orchestrators.")
+                    "The architectural cores here are base classes "
+                    "(high in-degree, low out-degree). Scoring is switched "
+                    "to the CRTP model so the top candidate is the "
+                    "most built-upon base, not a leaf implementation.")
         if abs_ratio < 0.05:
             return ('mixed',
                     f"Mostly concrete inheritance ({abstractions}/{classes} "

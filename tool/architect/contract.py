@@ -58,6 +58,13 @@ class Finding:
     evidence: list = field(default_factory=list)
     severity: str = "medium"       # "high" | "medium" | "low"
 
+    def key(self):
+        """Stable identity for baseline/ratchet comparison across runs.
+        Keyed on the KIND and the MODULES involved — NOT line numbers or
+        counts, which drift as the code moves. The same god-module or the
+        same cycle keeps the same key even as its evidence shifts."""
+        return self.kind + ":" + "+".join(sorted(self.modules))
+
 
 def load_universal_contract() -> RuleContract:
     """The built-in, no-config architecture principles. Each maps to a

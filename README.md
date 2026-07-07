@@ -17,7 +17,13 @@ top-down, and ships everything as one interactive HTML report.
   actual source.
 - **Architecture derivation** — orchestrator scoring, utility detection,
   dominator-tree workflow hierarchy, SCC cycle condensation, abstraction
-  folding, architecture style detection (OOP / mixed / CRTP with warning).
+  folding, and architecture-style detection: OOP by default, and a
+  dedicated CRTP / template-metaprogramming scoring model (the core is the
+  most built-upon base class, not a coordinator).
+- **CI-ready architecture gate** — `audit --baseline` freezes existing
+  debt; `audit --check` then fails the build (exit 1) only on NEW module
+  cycles / god-modules / rule violations. A ratchet: you can't add debt,
+  and fixed debt is locked out.
 - **Two-pass LLM design review** — per-subtree analysis then module-level
   synthesis; methodology is user-overridable via `skills/design_critic.md`.
 - **Interactive HTML report** — one single file, no server: workflow tree,
@@ -53,7 +59,7 @@ python run.py report         # → outputs/report.html, open in any browser
 |---------|-------------|
 | `init` | Initialize / reset the database |
 | `analyze <path>` | Fixed pipeline: scan → design review. `<path>` is a directory (a file argument scans its parent directory) |
-| `audit [path]` | Architecture audit + decoupling plan — deterministic, **no LLM key needed** |
+| `audit [path]` | Architecture audit + decoupling plan — deterministic, **no LLM key needed**. `--baseline` freezes current findings as accepted debt; `--check` gates CI on new ones (exit 1) |
 | `chat` | Talk to the codebase — an agentic loop that picks tools from your question (needs an LLM API key) |
 | `status` | Show analysis progress dashboard |
 | `report` | Generate the interactive HTML report |

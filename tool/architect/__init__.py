@@ -12,6 +12,8 @@ from .checker import StructuralChecker, RULE_CHECKERS
 from .compiler import RuleCompiler
 from .verifier import Verifier
 from .decouple import plan_decoupling, format_plans, DecouplePlan, Cut
+from .baseline import (load_baseline, save_baseline, partition,
+                       resolved_keys, DEFAULT_BASELINE_NAME)
 
 __all__ = [
     "run_architecture_audit", "format_findings",
@@ -19,4 +21,6 @@ __all__ = [
     "ModuleBuilder", "ModuleGraph", "StructuralChecker", "RULE_CHECKERS",
     "RuleCompiler", "Verifier",
     "plan_decoupling", "format_plans", "DecouplePlan", "Cut",
+    "load_baseline", "save_baseline", "partition", "resolved_keys",
+    "DEFAULT_BASELINE_NAME",
 ]

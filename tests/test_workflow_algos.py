@@ -48,6 +48,38 @@ class TestReachCounts:
             assert scores[n]["reach"] == len(nx.descendants(g, n))
 
 
+class TestCrtpScoring:
+    """CRTP inverts the orchestrator signature — the core is the base
+    class everyone builds on. The CRTP model must surface it; the OOP
+    model must not."""
+
+    def _base_heavy_graph(self):
+        g = nx.DiGraph()
+        for w in ("W1", "W2", "W3", "W4", "W5"):
+            g.add_edge(w, "Base", weight=1.0)      # widgets inherit Base
+        g.add_edge("Coord", "W1", weight=1.0)
+        g.add_edge("Coord", "W2", weight=1.0)      # a coordinator (OOP-core)
+        return g
+
+    def test_crtp_model_surfaces_the_base(self):
+        g = self._base_heavy_graph()
+        crtp = score_nodes(g, style="crtp")
+        top = max(crtp, key=lambda n: crtp[n]["score"])
+        assert top == "Base"
+        # reverse-reach = how many build on it (all 5 widgets + coord)
+        assert crtp["Base"]["reach"] == 6
+
+    def test_oop_model_does_not_pick_the_base(self):
+        g = self._base_heavy_graph()
+        oop = score_nodes(g, style="oop")
+        top = max(oop, key=lambda n: oop[n]["score"])
+        assert top != "Base"                       # OOP would sink the base
+
+    def test_default_style_is_oop(self):
+        g = self._base_heavy_graph()
+        assert score_nodes(g) == score_nodes(g, style="oop")
+
+
 class TestClassifyUtility:
     def test_sink_with_fan_in_is_utility(self):
         g = nx.DiGraph([("a", "u"), ("b", "u")])

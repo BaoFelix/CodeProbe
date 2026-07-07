@@ -57,7 +57,9 @@ class ScannerAgent(BaseAgent):
         # ── Orchestrator scoring + style detection ───────────
         g = build_graph(entities, relationships)
         style, note = detect_style(entities, relationships, g)
-        scores = score_nodes(g)
+        # CRTP code inverts the orchestrator signature — score it with the
+        # matching model so the top candidate is the real base, not a leaf.
+        scores = score_nodes(g, style=style)
         if scores:
             top = max(scores.items(), key=lambda kv: kv[1]['score'])
             orchestrator = top[0]

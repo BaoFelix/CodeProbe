@@ -35,16 +35,35 @@ def main():
 
     # audit: the deterministic architecture check + decoupling plan.
     # Deliberately key-free — this is the moat, runnable with zero LLM.
+    #   --baseline  freeze current findings as accepted debt
+    #   --check     report only findings NOT in the baseline (CI gate;
+    #               exit 1 when new findings exist)
     if cmd == 'audit':
         from .tools import ToolContext, build_registry, run_tool
-        ctx = ToolContext.build(args[1] if len(args) > 1 else None)
+        baseline = 'off'
+        rest = args[1:]
+        if '--baseline' in rest:
+            baseline = 'update'; rest.remove('--baseline')
+        if '--check' in rest:
+            baseline = 'check'; rest.remove('--check')
+        target = rest[0] if rest else None
+        ctx = ToolContext.build(target)
         registry = build_registry(ctx)
-        scan = run_tool(registry, 'scan_source',
-                        {'directory': args[1] if len(args) > 1 else ''}, ctx)
-        print(f"  {scan}\n")
-        print(run_tool(registry, 'architecture_audit', {}, ctx))
-        print()
-        print(run_tool(registry, 'decoupling_plan', {}, ctx))
+        # Force a fresh scan: `audit <path>` must reflect THIS path, but the
+        # shared DB may hold a previous run's graph (the idempotent scan
+        # would otherwise skip and audit stale data).
+        print(f"  {run_tool(registry, 'scan_source', {'directory': target or '', 'force': True}, ctx)}\n")
+        audit = run_tool(registry, 'architecture_audit', {'baseline': baseline}, ctx)
+        print(audit)
+        if baseline != 'update':
+            print()
+            print(run_tool(registry, 'decoupling_plan', {}, ctx))
+        # CI gate: non-zero exit when the baseline check found new findings
+        if baseline == 'check':
+            import re
+            m = re.search(r'Baseline check: (\d+) NEW', audit)
+            if m and int(m.group(1)) > 0:
+                sys.exit(1)
         return
 
     if cmd == 'help':
@@ -87,6 +106,9 @@ Commands:
                           Formats: .hxx .h .hpp .cxx .cpp .c .sch
   audit [path]            Architecture audit + decoupling plan —
                           deterministic, needs NO LLM key
+       --baseline         freeze current findings as accepted debt
+       --check            report only NEW findings vs baseline
+                          (exit 1 if any — a CI gate)
   status                  Show analysis progress dashboard
   report                  Generate the interactive HTML report
   chat                    Talk to the codebase (agentic; needs LLM API)

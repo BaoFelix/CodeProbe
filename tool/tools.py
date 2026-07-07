@@ -272,12 +272,26 @@ def _load_arch_skill():
     return None
 
 
-def _architecture_audit(ctx, strategy="auto", verify=False):
+def _baseline_path(ctx):
+    # The baseline is a per-project file the user commits and CI reads, so
+    # it belongs where the command is run (the repo root), not inside our
+    # install. cwd is the predictable, CI-friendly convention.
+    from .architect import DEFAULT_BASELINE_NAME
+    return Path.cwd() / DEFAULT_BASELINE_NAME
+
+
+def _architecture_audit(ctx, strategy="auto", verify=False, baseline="off"):
     """Architecture-level (module) health check.
 
     Core is deterministic: group classes into modules, find structural
     problems (cycles, god modules, plus any rules the user declared) — each
     with file:line evidence. No API key needed for the built-in checks.
+
+    baseline mode (CI ratchet — freeze legacy debt, gate only NEW issues):
+      · "off"    (default) report every finding
+      · "update" freeze the current findings as the accepted baseline
+      · "check"  report only findings NOT in the baseline (+ note how many
+                 pre-existing were suppressed and how many got resolved)
 
     Optional LLM steps (only if an endpoint is configured):
       · skills/architecture.md present → compile the user's plain-language
@@ -285,7 +299,9 @@ def _architecture_audit(ctx, strategy="auto", verify=False):
       · verify=true → drop LLM-judged false positives.
     Requires a prior scan."""
     from .architect import (run_architecture_audit, format_findings,
-                            load_universal_contract, RuleCompiler, Verifier)
+                            load_universal_contract, RuleCompiler, Verifier,
+                            load_baseline, save_baseline, partition,
+                            resolved_keys)
     classes = [dict(r) for r in ctx.db.get_classes()]
     if not classes:
         return "Nothing to audit. Run scan_source first."
@@ -305,11 +321,28 @@ def _architecture_audit(ctx, strategy="auto", verify=False):
     if verify and findings and _llm_ready(ctx):
         findings = Verifier(ctx.llm).verify(findings)
 
-    out = format_findings(findings, mg)
     note = _resolution_note(rels)
-    if note:
-        out = note + "\n" + out
-    return out
+    prefix = (note + "\n") if note else ""
+
+    if baseline == "update":
+        n = save_baseline(_baseline_path(ctx), findings)
+        return prefix + (f"Baseline frozen: {n} existing finding(s) accepted "
+                         f"as debt at {_baseline_path(ctx)}. Future audits in "
+                         f"'check' mode report only NEW findings.")
+    if baseline == "check":
+        frozen = load_baseline(_baseline_path(ctx))
+        new, known = partition(findings, frozen)
+        resolved = resolved_keys(findings, frozen)
+        head = (f"Baseline check: {len(new)} NEW, {len(known)} known "
+                f"(suppressed), {len(resolved)} resolved since baseline.\n")
+        if resolved:
+            head += ("  ↓ resolved (re-run with baseline=update to lock in):\n"
+                     + "".join(f"    ✓ {k}\n" for k in sorted(resolved)))
+        body = (format_findings(new, mg) if new
+                else "✓ No new architecture findings vs the baseline.")
+        return prefix + head + body
+
+    return prefix + format_findings(findings, mg)
 
 
 def _decoupling_plan(ctx, strategy="auto"):
@@ -373,7 +406,10 @@ def build_registry(ctx: ToolContext) -> dict:
                  _obj({"strategy": {"type": "string",
                                     "description": "auto|folder|namespace|community"},
                        "verify": {"type": "boolean",
-                                  "description": "LLM-verify findings to drop false positives"}}),
+                                  "description": "LLM-verify findings to drop false positives"},
+                       "baseline": {"type": "string",
+                                    "description": "off|update|check — CI ratchet: "
+                                    "freeze legacy debt, gate only new findings"}}),
                  _architecture_audit),
         ToolSpec("decoupling_plan",
                  "For each module cycle, compute a surgical decoupling plan: "
