@@ -163,8 +163,20 @@ _HTML = r"""<!DOCTYPE html>
        font-size:12px;color:#713f12;"></div>
 </header>
 
+<section id="sec-arch">
+  <h2>1. Architecture <span class="hint">Module dependency graph · red = god module · orange = in a dependency cycle · drag / scroll</span></h2>
+  <div class="legend">
+    <span style="color:#dc2626"><b>●</b> god module</span>
+    <span style="color:#d9822b"><b>●</b> in a cycle</span>
+    <span style="color:#d9822b"><b>→</b> cycle edge</span>
+    <span>edge label = # references</span>
+  </div>
+  <div id="arch-summary" class="hint" style="margin:0 16px 8px"></div>
+  <div class="graph" id="cy-arch"></div>
+</section>
+
 <section>
-  <h2>1. Architecture <span class="hint">Workflow hierarchy (dominator tree) · click [+] nodes to expand, click again to collapse</span></h2>
+  <h2>2. Workflow <span class="hint">Responsibility hierarchy (dominator tree) · click [+] nodes to expand, click again to collapse</span></h2>
   <div class="legend">
     <span><b>◆</b> composes</span><span><b>◇</b> aggregates</span><span><b>→</b> associates</span>
     <span><b>△</b> inherits</span><span><b>┄△</b> implements</span>
@@ -175,7 +187,7 @@ _HTML = r"""<!DOCTYPE html>
 </section>
 
 <section>
-  <h2>2. Relationships
+  <h2>3. Relationships
     <span class="hint">Click a node to expand · drag any node to rearrange · scroll to zoom</span>
     <button id="rel-reset" style="float:right;font-size:11px;padding:3px 10px;cursor:pointer;
             border:1px solid var(--line);background:#fff;border-radius:4px;">Reset layout</button>
@@ -190,7 +202,7 @@ _HTML = r"""<!DOCTYPE html>
 </section>
 
 <section>
-  <h2>3. Design Review <span class="hint">Collapsed by default · click a title to expand</span></h2>
+  <h2>4. Design Review <span class="hint">Collapsed by default · click a title to expand</span></h2>
   <div class="review" id="review"></div>
 </section>
 
@@ -479,7 +491,58 @@ function makeGraph(containerId, edgePred){
   }
 })();
 
-/* Section 2: all relations, UML */
+/* Section 1: module architecture graph (deterministic audit). Hides
+   itself when no audit has run. Reuses the same layout-once discipline. */
+(function(){
+  const A = DATA.arch_graph;
+  const sec = document.getElementById('sec-arch');
+  if(!A || !A.nodes || !A.nodes.length){ if(sec) sec.style.display='none'; return; }
+  const sum = document.getElementById('arch-summary');
+  if(sum){
+    let s = `${A.module_count} modules · ${A.edge_count} dependencies · grouped by ${A.strategy}`;
+    const nf = (A.findings||[]).length;
+    if(nf) s += ` · ⚠ ${nf} finding${nf>1?'s':''}`;
+    if(A.unresolved_pct!=null && A.unresolved_pct>25)
+      s += ` · ⚠ ${A.unresolved_pct}% unresolved — treat gaps with caution`;
+    sum.textContent = s;
+  }
+  if(!GRAPH_LIBS_OK){
+    document.getElementById('cy-arch').innerHTML =
+      '<p style="padding:1em;color:var(--muted)">Module graph needs the '+
+      'CDN graph library (offline). The findings are in the Design Review.</p>';
+    return;
+  }
+  const els=[];
+  for(const n of A.nodes){
+    els.push({data:{id:n.id, label:n.id+' ('+n.size+')',
+      cls: n.is_god?'god':(n.in_cycle?'cyc':'mod')}});
+  }
+  for(const e of A.edges){
+    els.push({data:{id:e.source+'>'+e.target, source:e.source, target:e.target,
+      label:String(e.weight), cls: e.in_cycle?'cyc':'dep'}});
+  }
+  const cy=cytoscape({container:document.getElementById('cy-arch'), elements:els,
+    style:[
+      {selector:'node',style:{'label':'data(label)','font-size':11,
+        'text-valign':'center','color':'#fff','text-outline-width':2,
+        'text-outline-color':'#64748b','background-color':'#64748b',
+        'width':'label','height':28,'padding':'8px','shape':'round-rectangle'}},
+      {selector:'node[cls="god"]',style:{'background-color':'#dc2626',
+        'text-outline-color':'#dc2626','width':'label','height':40,'font-size':13}},
+      {selector:'node[cls="cyc"]',style:{'background-color':'#d9822b',
+        'text-outline-color':'#d9822b'}},
+      {selector:'edge',style:{'label':'data(label)','font-size':9,'color':'#94a3b8',
+        'width':1.5,'line-color':'#cbd5e1','target-arrow-color':'#cbd5e1',
+        'target-arrow-shape':'triangle','curve-style':'bezier'}},
+      {selector:'edge[cls="cyc"]',style:{'line-color':'#d9822b','width':3,
+        'target-arrow-color':'#d9822b','color':'#b45309'}},
+    ],
+    layout:{name:'cose-bilkent','nodeDimensionsIncludeLabels':true,'idealEdgeLength':120,
+      'nodeRepulsion':9000,'animate':false}});
+  cy.userZoomingEnabled(true); cy.userPanningEnabled(true);
+})();
+
+/* Section 3: all relations, UML */
 makeGraph('cy-rel', e=>true);
 
 /* Section 3: design review */

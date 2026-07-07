@@ -64,6 +64,7 @@ def build_payload(db):
                                  utilities, phantoms)
     arch = _build_arch(g, rep, C, label, roots, orch_name, utilities,
                        phantoms)
+    arch_graph = _build_arch_graph(db)
     review = _build_review(db)
 
     summary = {
@@ -74,7 +75,27 @@ def build_payload(db):
         'style': _get(orchestrator, 'style'),
         'style_note': _get(orchestrator, 'style_note'),
     }
-    return {'summary': summary, 'graph': graph, 'arch': arch, 'review': review}
+    return {'summary': summary, 'arch_graph': arch_graph,
+            'graph': graph, 'arch': arch, 'review': review}
+
+
+def _build_arch_graph(db):
+    """Module-level graph for the report's headline Architecture section.
+    Reads the persisted deterministic audit; None if none has run (so the
+    section hides itself). Nodes/edges already carry in_cycle / god flags."""
+    audit = db.get_arch_audit()
+    if not audit:
+        return None
+    p = audit['payload']
+    return {
+        'nodes': p['nodes'],
+        'edges': p['edges'],
+        'findings': p['findings'],
+        'strategy': p.get('strategy'),
+        'unresolved_pct': p.get('unresolved_pct'),
+        'module_count': p.get('module_count'),
+        'edge_count': p.get('edge_count'),
+    }
 
 
 def _build_arch(g, rep_map, C, label, roots, orch_name, utilities, phantoms):

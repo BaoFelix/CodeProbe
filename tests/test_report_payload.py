@@ -64,6 +64,34 @@ class TestBuildPayload:
         payload = build_payload(_scan_fixture(tmp_path))
         assert payload["review"] is not None     # empty-but-valid, no crash
 
+    def test_arch_graph_absent_until_audit_runs(self, tmp_path):
+        payload = build_payload(_scan_fixture(tmp_path))
+        assert payload["arch_graph"] is None     # section hides itself
+
+    def test_arch_graph_present_with_cycle_flags_after_audit(self, tmp_path):
+        # a real 2-folder module cycle → persisted audit → arch_graph payload
+        from tool import tools as T
+        from tool.llm import LLMClient
+        src = tmp_path / "src"
+        (src / "foo").mkdir(parents=True)
+        (src / "bar").mkdir(parents=True)
+        (src / "foo" / "A.hxx").write_text("class B;\nclass A { B* b; };\n")
+        (src / "bar" / "B.hxx").write_text("class A;\nclass B { A* a; };\n")
+        db = DBManager(tmp_path / "t.db"); db.ensure_tables()
+        ctx = T.ToolContext(db=db, llm=LLMClient(cache=db),
+                            reader=SourceReader(str(src), db=db),
+                            source_root=src)
+        reg = T.build_registry(ctx)
+        T.run_tool(reg, "scan_source", {"directory": str(src)}, ctx)
+        T.run_tool(reg, "architecture_audit", {"strategy": "folder"}, ctx)
+
+        ag = build_payload(db)["arch_graph"]
+        assert ag is not None
+        assert {n["id"] for n in ag["nodes"]} == {"foo", "bar"}
+        assert all(n["in_cycle"] for n in ag["nodes"])       # both in the cycle
+        assert all(e["in_cycle"] for e in ag["edges"])
+        assert any(f["kind"] == "no_module_cycle" for f in ag["findings"])
+
     def test_orchestrator_never_renders_as_utility(self, tmp_path):
         # A CRTP core matches the utility shape (in>=2, out==0). If the
         # scorer crowned it orchestrator, the report must not tag the same
