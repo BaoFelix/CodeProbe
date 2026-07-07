@@ -23,6 +23,7 @@ acceptable answer to a gpt-4o question.
 import hashlib
 import json
 import os
+import threading
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
@@ -75,6 +76,11 @@ class LLMClient:
         # prompt changes that don't change prompt text).
         self.cache = cache
         self.cache_disabled = bool(os.environ.get('LLM_NO_CACHE'))
+        # Which model actually answered the LAST call — kept thread-local
+        # because the design review fans generate() out across threads, and
+        # a shared attribute would race (one thread's fallback would corrupt
+        # another's cache-write decision).
+        self._tl = threading.local()
 
     def _prompt_hash(self, prompt, system_prompt):
         """Stable fingerprint of an LLM call. Includes both the user
@@ -114,9 +120,10 @@ class LLMClient:
                 pass    # cache failure must not block the call
 
         # ── miss → real API call ─────────────────────────
-        # _answered_by records which model actually produced the text —
-        # a 429 may have walked the fallback chain mid-call.
-        self._answered_by = self.model
+        # _tl.answered_by records which model actually produced the text —
+        # a 429 may have walked the fallback chain mid-call. Thread-local so
+        # concurrent design-review calls don't clobber each other.
+        self._tl.answered_by = self.model
         if self.api_format == "anthropic":
             response = self._api_call_anthropic(prompt, system_prompt)
         else:
@@ -128,7 +135,7 @@ class LLMClient:
         # as if the primary had said it — permanent cache poisoning for
         # one rate-limited moment.
         if (response is not None
-                and self._answered_by == self.model
+                and getattr(self._tl, 'answered_by', self.model) == self.model
                 and self.cache is not None
                 and not self.cache_disabled):
             try:
@@ -336,7 +343,7 @@ class LLMClient:
             with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
                 content = data["choices"][0]["message"]["content"]
-                self._answered_by = model      # may be a fallback model
+                self._tl.answered_by = model   # may be a fallback model
                 tokens = data.get("usage", {})
                 if tokens:
                     print(f"    ✓ Got response (prompt={tokens.get('prompt_tokens','?')}"
@@ -433,7 +440,7 @@ class LLMClient:
                 data = json.loads(resp.read().decode('utf-8'))
                 # Anthropic response format: {"content": [{"type":"text","text":"..."}], "usage": {...}}
                 content = data["content"][0]["text"]
-                self._answered_by = model      # may be a fallback model
+                self._tl.answered_by = model   # may be a fallback model
                 usage = data.get("usage", {})
                 if usage:
                     print(f"    ✓ Got response (input={usage.get('input_tokens','?')}"

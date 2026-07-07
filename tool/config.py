@@ -74,3 +74,18 @@ try:
     LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
 except ValueError:
     LLM_TIMEOUT = 120
+
+# Design-review pass-1 fans its independent subtree calls out concurrently
+# (I/O-bound → a thread pool, not asyncio, is the simple+effective fit).
+# LLM_MAX_WORKERS bounds the fan-out so a shared enterprise endpoint isn't
+# hammered. LLM_REVIEW_DEADLINE (seconds, 0 = off) is a SOFT overall
+# deadline: when it elapses, the review proceeds with whatever finished and
+# leaves the rest for a resume run — so the user isn't blocked on stragglers.
+try:
+    LLM_MAX_WORKERS = max(1, int(os.environ.get("LLM_MAX_WORKERS", "6")))
+except ValueError:
+    LLM_MAX_WORKERS = 6
+try:
+    LLM_REVIEW_DEADLINE = int(os.environ.get("LLM_REVIEW_DEADLINE", "0"))
+except ValueError:
+    LLM_REVIEW_DEADLINE = 0

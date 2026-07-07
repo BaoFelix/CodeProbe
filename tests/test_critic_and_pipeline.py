@@ -40,10 +40,13 @@ class TestSubtreeCollection:
         assert {"Garage::A", "Garage::B", "Root"} <= concrete
 
 
-class TestReviewCircuitBreaker:
-    def test_aborts_after_three_consecutive_llm_failures(self, tmp_path):
-        # An unreachable LLM (every generate() returns None) must abort the
-        # review after 3 failures, not grind through every subtree.
+class TestReviewResilience:
+    def test_aborts_cleanly_when_llm_unreachable(self, tmp_path):
+        # Every subtree call returns None (persistent timeout / dead
+        # endpoint). The concurrent review must abort with False — not
+        # crash, not emit an empty review as if it succeeded. (Concurrency
+        # itself replaces the old sequential circuit-breaker: all failures
+        # now happen inside one timeout window, not N of them.)
         from tool.agents import ScannerAgent
         from tool.design_critic import DesignCriticAgent
         from tool.db import DBManager
@@ -53,18 +56,76 @@ class TestReviewCircuitBreaker:
         db.ensure_tables()
 
         class DeadLLM:
-            calls = 0
-
             def generate(self, prompt, system_prompt="", tag=""):
-                DeadLLM.calls += 1
-                return None                     # simulate persistent timeout
+                return None
 
         reader = SourceReader("test_src", db=db)
         ScannerAgent(llm=DeadLLM(), db=db, reader=reader).run("test_src")
-        dead = DeadLLM()
-        ok = DesignCriticAgent(llm=dead, db=db, reader=reader).run()
-        assert ok is False                      # aborted, didn't crash
-        assert DeadLLM.calls <= 3 + 1           # stopped ~3 in, not all subtrees
+        ok = DesignCriticAgent(llm=DeadLLM(), db=db, reader=reader).run()
+        assert ok is False
+        # nothing bogus persisted (all None responses)
+        got = db.get_design_module()
+        assert got is None or not (got["parsed_json"] or "")
+
+    def test_completed_subtrees_not_reattempted_on_rerun(self, tmp_path):
+        # The resume guarantee: subtrees already in the DB are skipped on a
+        # re-run, so only the ones a prior (slow) run never finished are
+        # attempted. Here run 1 completes everything, so run 2 must do zero
+        # subtree calls.
+        from tool.agents import ScannerAgent
+        from tool.design_critic import DesignCriticAgent
+        from tool.db import DBManager
+        from tool.source_io import SourceReader
+
+        db = DBManager(tmp_path / "t.db")
+        db.ensure_tables()
+        reader = SourceReader("test_src", db=db)
+
+        class CountingLLM:
+            def __init__(self):
+                self.subtree_calls = 0
+
+            def generate(self, prompt, system_prompt="", tag=""):
+                if tag.startswith("critic_subtree"):
+                    self.subtree_calls += 1
+                return '{"essence": "x", "pains": []}'
+
+        ScannerAgent(llm=CountingLLM(), db=db, reader=reader).run("test_src")
+
+        run1 = CountingLLM()
+        assert DesignCriticAgent(llm=run1, db=db, reader=reader).run() is True
+        assert run1.subtree_calls >= 2          # did the work the first time
+
+        run2 = CountingLLM()
+        DesignCriticAgent(llm=run2, db=db, reader=reader).run()
+        assert run2.subtree_calls == 0          # every subtree resumed, none redone
+
+    def test_concurrent_fanout_is_order_independent(self, tmp_path):
+        # With workers > 1 the subtree calls race; the persisted result set
+        # must be exactly the roots regardless of completion order.
+        from tool.agents import ScannerAgent
+        from tool.design_critic import DesignCriticAgent
+        from tool.db import DBManager
+        from tool.source_io import SourceReader
+        import random
+        import time
+
+        db = DBManager(tmp_path / "t.db")
+        db.ensure_tables()
+        reader = SourceReader("test_src", db=db)
+
+        class JitterLLM:
+            def generate(self, prompt, system_prompt="", tag=""):
+                if tag.startswith("critic_subtree"):
+                    time.sleep(random.uniform(0, 0.02))   # scramble order
+                return '{"essence": "x", "pains": []}'
+
+        ScannerAgent(llm=JitterLLM(), db=db, reader=reader).run("test_src")
+        assert DesignCriticAgent(llm=JitterLLM(), db=db, reader=reader).run() is True
+        rows = db.get_design_subtrees()
+        labels = [r["subtree_root"] for r in rows]
+        assert len(labels) == len(set(labels))            # no dupes from the race
+        assert all(r["parsed_json"] for r in rows)        # all persisted intact
 
 
 class TestSafeParseJson:

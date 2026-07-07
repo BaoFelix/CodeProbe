@@ -111,7 +111,7 @@ class TestBatchGenerateResilience:
                         api_format="openai", cache=db)
 
         def fake_api(prompt, system_prompt="", model_override=None):
-            llm._answered_by = "backup"     # simulate 429 → fallback answered
+            llm._tl.answered_by = "backup"  # simulate 429 → fallback answered
             return "weak answer"
         llm._api_call_openai = fake_api
         assert llm.generate("q") == "weak answer"
@@ -126,7 +126,7 @@ class TestBatchGenerateResilience:
                         api_format="openai", cache=db)
 
         def fake_api(prompt, system_prompt="", model_override=None):
-            llm._answered_by = "primary"
+            llm._tl.answered_by = "primary"
             return "good answer"
         llm._api_call_openai = fake_api
         llm.generate("q")
