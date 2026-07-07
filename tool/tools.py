@@ -322,6 +322,21 @@ def _architecture_audit(ctx, strategy="auto", verify=False, baseline="off"):
         findings = Verifier(ctx.llm).verify(findings)
 
     note = _resolution_note(rels)
+
+    # Persist the deterministic result so the report and the LLM tiers can
+    # read it. Skip persistence in baseline check/update (those are CI
+    # queries, not the canonical audit) so they don't overwrite the report's
+    # view with a filtered finding set.
+    if baseline == "off":
+        from .architect import plan_decoupling, audit_payload
+        from .db import graph_fingerprint
+        unresolved_pct = None
+        if rels:
+            unresolved_pct = round(
+                100.0 * sum(1 for r in rels if not r["target_qname"]) / len(rels), 1)
+        payload = audit_payload(findings, mg, plan_decoupling(mg), unresolved_pct)
+        ctx.db.save_arch_audit(payload, graph_hash=graph_fingerprint(rels))
+
     prefix = (note + "\n") if note else ""
 
     if baseline == "update":
