@@ -16,11 +16,11 @@ _critic_lenses are assembled and used.
 """
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 
 import networkx as nx
 
-from .config import LLM_MAX_WORKERS, LLM_REVIEW_DEADLINE
+from .config import LLM_MAX_WORKERS
 from .agents import BaseAgent
 from ._critic_lenses import (
     LENS_ESSENCE, LENS_PIPELINE, LENS_COHESION, LENS_ALTITUDE,
@@ -234,12 +234,18 @@ class DesignCriticAgent(BaseAgent):
             rels_by_source.setdefault(r.source_qname, []).append(r)
 
         # ── Pass 1: subtree analysis (concurrent + resumable) ─────
-        # RESUME: skip subtrees already analyzed in the DB, so a re-run
-        # only attempts the ones a previous (slow / interrupted) run never
-        # finished. Re-run with a bigger LLM_TIMEOUT to patiently retry
-        # the stubborn stragglers.
-        done_roots = {r['subtree_root'] for r in (self.db.get_design_subtrees() or [])
-                      if r['parsed_json']}
+        # RESUME, graph-scoped: a subtree counts as done only if it was
+        # attempted AND its stored analysis was computed from the CURRENT
+        # graph. So a re-run skips finished subtrees (only the unfinished
+        # ones re-run), a rescan that changed the graph invalidates stale
+        # subtrees, and a subtree that got a (possibly unparseable) answer
+        # is 'done' — while a timeout/None answer stays eligible for retry.
+        from .db import graph_fingerprint
+        current_hash = graph_fingerprint(self.db.get_relationships())
+        stored = self.db.get_design_subtrees() or []
+        done_roots = {r['subtree_root'] for r in stored
+                      if r['raw_response'] is not None
+                      and (r['graph_hash'] or current_hash) == current_hash}
         todo = [root for root in roots if label[root] not in done_roots]
         if done_roots:
             print(f"  [pass 1] {len(roots)} subtree(s); "
@@ -249,10 +255,9 @@ class DesignCriticAgent(BaseAgent):
                   f" (up to {LLM_MAX_WORKERS} in parallel)…")
 
         def analyze_one(root):
-            """Runs in a worker thread. Pure of shared mutable state:
-            builds its prompt, calls the LLM, returns the tuple. The main
-            thread does all DB writes, so a straggler finishing after the
-            deadline can't race the report."""
+            """Runs in a worker thread. No shared mutable state: it builds
+            its prompt and calls the LLM (whose per-call state is
+            thread-local); the MAIN thread does all DB writes."""
             folded_names = _collect_subtree(C, root)
             concrete_qnames = _expand_to_concrete(folded_names, rep_map)
             classes = [ent_by_qname[q] for q in concrete_qnames
@@ -273,59 +278,48 @@ class DesignCriticAgent(BaseAgent):
                 prompt, tag=f"critic_subtree_{label[root][:16]}")
             return label[root], prompt, response, _safe_parse_json(response)
 
-        completed, failed, pending = 0, 0, set()
+        completed, failed = 0, 0
         if todo:
-            ex = ThreadPoolExecutor(max_workers=min(LLM_MAX_WORKERS, len(todo)))
-            futures = {ex.submit(analyze_one, root): root for root in todo}
-            deadline = LLM_REVIEW_DEADLINE or None      # 0 → wait for all
-            finished, pending = wait(futures, timeout=deadline)
-            # Persist ONLY what finished, on the main thread (deterministic
-            # report; no background DB writes racing pass 2).
-            for fut in finished:
-                try:
-                    lbl, prompt, response, parsed = fut.result()
-                except Exception as e:            # a worker blew up — degrade it
-                    print(f"    ✗ subtree worker failed: {e}")
-                    failed += 1
-                    continue
-                self.db.save_design_subtree(lbl, prompt, response, parsed)
+            # wait for ALL — each call is bounded by LLM_TIMEOUT, and the
+            # `with` block joins the pool so there are no straggler threads
+            # left running past this scope (the abandoned-straggler design
+            # couldn't actually free the CLI at exit — see config note).
+            with ThreadPoolExecutor(
+                    max_workers=min(LLM_MAX_WORKERS, len(todo))) as ex:
+                futures = [ex.submit(analyze_one, root) for root in todo]
+                results = []
+                for fut in futures:
+                    try:
+                        results.append(fut.result())
+                    except Exception as e:        # a worker blew up — degrade it
+                        print(f"    ✗ subtree worker failed: {e}")
+                        failed += 1
+            # Persist on the MAIN thread, graph-stamped.
+            for lbl, prompt, response, parsed in results:
+                self.db.save_design_subtree(lbl, prompt, response, parsed,
+                                            graph_hash=current_hash)
                 if response is None:
                     failed += 1
                 else:
                     completed += 1
                     print(f"    ✓ {lbl} "
                           f"({len(parsed.get('pains', [])) if parsed else 0} pains)")
-            if pending:
-                # Soft deadline hit. Don't block on stragglers — abandon
-                # them to a resume run. Their in-flight generate() still
-                # warms the LLM cache, so the resume is fast.
-                print(f"  ⏱ {len(pending)} subtree(s) still running past the "
-                      f"{LLM_REVIEW_DEADLINE}s deadline — proceeding with "
-                      f"partial results; re-run `analyze --from=review` to "
-                      f"finish them.")
-            ex.shutdown(wait=False, cancel_futures=True)
 
-        # Nothing to synthesize AND no prior progress → stop with a cause
-        # that matches WHY (unreachable vs just-slow), instead of emitting
-        # an empty review as if it succeeded.
+        # Nothing to synthesize AND no prior progress → the LLM is
+        # unreachable; abort with a clear cause instead of an empty review.
         if todo and completed == 0 and not done_roots:
-            if failed and not pending:
-                print("  ✗ LLM unreachable — every subtree call failed. Check "
-                      "LLM_API_URL / LLM_API_KEY, or raise LLM_TIMEOUT if the "
-                      "endpoint is just slow.")
-            else:
-                print(f"  ⏱ No subtree finished within the "
-                      f"{LLM_REVIEW_DEADLINE}s deadline — raise "
-                      f"LLM_REVIEW_DEADLINE / LLM_TIMEOUT, or re-run "
-                      f"`analyze --from=review` to resume.")
+            print("  ✗ LLM unreachable — every subtree call failed. Check "
+                  "LLM_API_URL / LLM_API_KEY, or raise LLM_TIMEOUT if the "
+                  "endpoint is just slow, then re-run `analyze` to resume.")
             return False
 
         # Assemble pass-1 results from the DB (resumed + freshly completed),
-        # so pass 2 sees the full accumulated picture, not just this run's.
+        # scoped to the current graph so a stale prior-run subtree can't leak.
         subtree_results = [{'root': r['subtree_root'],
                             'result': json.loads(r['parsed_json'])
                             if r['parsed_json'] else None}
-                           for r in (self.db.get_design_subtrees() or [])]
+                           for r in (self.db.get_design_subtrees() or [])
+                           if (r['graph_hash'] or current_hash) == current_hash]
 
         # Pass 2 synthesizes ACROSS subtree essences; with nothing usable to
         # synthesize (every response was unparseable), skip it — the report

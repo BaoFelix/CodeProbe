@@ -348,13 +348,24 @@ def condense(g):
     """
     C = nx.condensation(g)               # nodes carry a 'members' set
     label = {}
+    seen = {}                            # base label → next disambig index
     for cid in C.nodes:
         members = C.nodes[cid]['members']
         if len(members) == 1:
-            label[cid] = next(iter(members))
+            base = next(iter(members))
         else:
             shorts = sorted(m.split('::')[-1] for m in members)
-            label[cid] = 'cluster(' + ', '.join(shorts) + ')'
+            base = 'cluster(' + ', '.join(shorts) + ')'
+        # Labels are the resume/storage KEY for a subtree, so they must be
+        # unique. Two different clusters can otherwise collapse to the same
+        # 'cluster(...)' string (same short names across namespaces) and be
+        # conflated on resume — disambiguate with a suffix.
+        if base in seen:
+            seen[base] += 1
+            label[cid] = f'{base}#{seen[base]}'
+        else:
+            seen[base] = 0
+            label[cid] = base
     return C, label
 
 

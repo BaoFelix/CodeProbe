@@ -100,6 +100,84 @@ class TestReviewResilience:
         DesignCriticAgent(llm=run2, db=db, reader=reader).run()
         assert run2.subtree_calls == 0          # every subtree resumed, none redone
 
+    def _scan(self, tmp_path):
+        from tool.agents import ScannerAgent
+        from tool.db import DBManager
+        from tool.source_io import SourceReader
+
+        class Nil:
+            def generate(self, *a, **k):
+                return None
+        db = DBManager(tmp_path / "t.db")
+        db.ensure_tables()
+        reader = SourceReader("test_src", db=db)
+        ScannerAgent(llm=Nil(), db=db, reader=reader).run("test_src")
+        return db, reader
+
+    def test_unparseable_answer_converges(self, tmp_path):
+        # An LLM that always returns non-JSON: the subtree is 'attempted +
+        # answered', so it must count as done and NOT loop forever on resume.
+        from tool.design_critic import DesignCriticAgent
+        db, reader = self._scan(tmp_path)
+
+        class Garbage:
+            def __init__(self): self.calls = 0
+            def generate(self, prompt, system_prompt="", tag=""):
+                if tag.startswith("critic_subtree"): self.calls += 1
+                return "not json at all"
+
+        r1 = Garbage(); DesignCriticAgent(llm=r1, db=db, reader=reader).run()
+        assert r1.calls >= 2
+        r2 = Garbage(); DesignCriticAgent(llm=r2, db=db, reader=reader).run()
+        assert r2.calls == 0                    # converged, not re-attempted
+
+    def test_timeout_none_answer_is_retried(self, tmp_path):
+        # A None (timeout) answer must stay eligible for retry — the opposite
+        # of the unparseable case.
+        from tool.design_critic import DesignCriticAgent
+        db, reader = self._scan(tmp_path)
+
+        class Nil:
+            def __init__(self): self.calls = 0
+            def generate(self, prompt, system_prompt="", tag=""):
+                if tag.startswith("critic_subtree"): self.calls += 1
+                return None
+
+        r1 = Nil(); DesignCriticAgent(llm=r1, db=db, reader=reader).run()
+        assert r1.calls >= 2
+        r2 = Nil(); DesignCriticAgent(llm=r2, db=db, reader=reader).run()
+        assert r2.calls >= 2                    # None never marks a subtree done
+
+    def test_graph_change_invalidates_completed_subtrees(self, tmp_path):
+        from tool.design_critic import DesignCriticAgent
+        db, reader = self._scan(tmp_path)
+
+        class Ok:
+            def __init__(self): self.calls = 0
+            def generate(self, prompt, system_prompt="", tag=""):
+                if tag.startswith("critic_subtree"): self.calls += 1
+                return '{"essence": "x", "pains": []}'
+
+        r1 = Ok(); DesignCriticAgent(llm=r1, db=db, reader=reader).run()
+        assert r1.calls >= 2
+        # change the graph → old subtree fingerprints go stale
+        db._execute("DELETE FROM relationships WHERE rowid IN "
+                    "(SELECT rowid FROM relationships LIMIT 3)")
+        r2 = Ok(); DesignCriticAgent(llm=r2, db=db, reader=reader).run()
+        assert r2.calls >= 2                    # stale subtrees re-done, not resumed
+
+    def test_reset_review_preserves_subtrees_for_resume(self, tmp_path):
+        # --from=review must clear only the module synthesis, leaving
+        # pass-1 subtrees so the re-run resumes instead of redoing all.
+        from tool.db import DBManager
+        db = DBManager(tmp_path / "t.db"); db.ensure_tables()
+        db.save_design_subtree("A", "p", "r", {"pains": []}, graph_hash="h")
+        db.save_design_module("default", "p", "r", {"recommendations": []},
+                              graph_hash="h")
+        db.delete_design_module()
+        assert db.get_design_subtrees()          # subtrees survive
+        assert db.get_design_module() is None    # synthesis cleared
+
     def test_concurrent_fanout_is_order_independent(self, tmp_path):
         # With workers > 1 the subtree calls race; the persisted result set
         # must be exactly the roots regardless of completion order.

@@ -103,6 +103,32 @@ class TestCrtpScoring:
         assert mi["orchestrator"] == "Base", mi["orchestrator"]
 
 
+class TestCondenseLabels:
+    def test_labels_are_unique_even_on_collision(self):
+        # Two separate 2-cycles whose members have the SAME short names
+        # across namespaces would both render 'cluster(A, B)'. The labels
+        # are the resume key, so they MUST stay distinct.
+        from tool.workflow import build_graph, condense
+        from tool.model import Entity, Relationship
+
+        def ent(q):
+            return Entity(kind="class", name=q.split("::")[-1],
+                          qualified_name=q, file_path="x.hxx",
+                          start_line=1, end_line=2)
+
+        def rel(s, t):
+            return Relationship(source_qname=s, target_name=t.split("::")[-1],
+                                kind="depends", evidence_file="x", evidence_line=1,
+                                target_qname=t)
+
+        ents = [ent(q) for q in ("N1::A", "N1::B", "N2::A", "N2::B")]
+        rels = [rel("N1::A", "N1::B"), rel("N1::B", "N1::A"),
+                rel("N2::A", "N2::B"), rel("N2::B", "N2::A")]
+        _, label = condense(build_graph(ents, rels))
+        labels = list(label.values())
+        assert len(labels) == len(set(labels)), labels   # no collision
+
+
 class TestClassifyUtility:
     def test_sink_with_fan_in_is_utility(self):
         g = nx.DiGraph([("a", "u"), ("b", "u")])

@@ -209,6 +209,7 @@ class DBManager:
                     prompt          TEXT,
                     raw_response    TEXT,
                     parsed_json     TEXT,
+                    graph_hash      TEXT,
                     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
 
@@ -224,16 +225,40 @@ class DBManager:
                     graph_hash      TEXT,
                     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+
+                /* ── arch_audit: the deterministic architecture-level result
+                   (module graph + findings + decoupling plans) as one JSON
+                   payload. The report renders it and the LLM tiers explain
+                   it. graph_hash detects staleness after a rescan. */
+                CREATE TABLE IF NOT EXISTS arch_audit (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    payload_json TEXT,
+                    graph_hash   TEXT,
+                    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                /* ── arch_module_review: Tier-1 per-module LLM analysis,
+                   one row per module, computed concurrently and grounded on
+                   that module's deterministic findings. Tier-2 (the global
+                   accumulative conclusion) reuses design_critic_module with
+                   module_name='architecture'. */
+                CREATE TABLE IF NOT EXISTS arch_module_review (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    module_name  TEXT NOT NULL,
+                    parsed_json  TEXT,
+                    graph_hash   TEXT,
+                    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
             """)
             conn.commit()
-            # Migration for DBs created before graph_hash existed —
-            # idempotent: ALTER fails harmlessly once the column is there.
-            try:
-                conn.execute("ALTER TABLE design_critic_module "
-                             "ADD COLUMN graph_hash TEXT")
-                conn.commit()
-            except sqlite3.OperationalError:
-                pass
+            # Migrations for DBs created before graph_hash existed —
+            # idempotent: each ALTER fails harmlessly once the column is there.
+            for tbl in ("design_critic_module", "design_critic_subtree"):
+                try:
+                    conn.execute(f"ALTER TABLE {tbl} ADD COLUMN graph_hash TEXT")
+                    conn.commit()
+                except sqlite3.OperationalError:
+                    pass
         finally:
             conn.close()
 
@@ -471,14 +496,14 @@ class DBManager:
     # ─── DesignCritic outputs ───────────────────────────────
 
     def save_design_subtree(self, subtree_root, prompt, raw_response,
-                            parsed):
+                            parsed, graph_hash=None):
         import json as _json
         self._execute("""
             INSERT INTO design_critic_subtree
-                (subtree_root, prompt, raw_response, parsed_json)
-            VALUES (?, ?, ?, ?)
+                (subtree_root, prompt, raw_response, parsed_json, graph_hash)
+            VALUES (?, ?, ?, ?, ?)
         """, (subtree_root, prompt, raw_response,
-              _json.dumps(parsed) if parsed else None))
+              _json.dumps(parsed) if parsed else None, graph_hash))
 
     def save_design_module(self, module_name, prompt, raw_response, parsed,
                            graph_hash=None):
@@ -508,6 +533,57 @@ class DBManager:
             "WHERE module_name = ? ORDER BY id DESC LIMIT 1",
             (module_name,))
 
-    def delete_design_critic(self):
-        self._execute("DELETE FROM design_critic_subtree")
+    def delete_design_module(self):
+        """Clear only the pass-2 synthesis. Leaves the per-subtree pass-1
+        results intact so a --from=review re-run RESUMES (re-attempts only
+        the unfinished subtrees) rather than redoing all of them."""
         self._execute("DELETE FROM design_critic_module")
+
+    def delete_design_subtrees(self):
+        self._execute("DELETE FROM design_critic_subtree")
+
+    def delete_design_critic(self):
+        self.delete_design_subtrees()
+        self.delete_design_module()
+
+    # ─── Architecture audit (deterministic) + tiered LLM reviews ──
+
+    def save_arch_audit(self, payload, graph_hash=None):
+        """Persist the latest deterministic architecture audit payload."""
+        import json as _json
+        self._execute(
+            "INSERT INTO arch_audit (payload_json, graph_hash) VALUES (?, ?)",
+            (_json.dumps(payload), graph_hash))
+
+    def get_arch_audit(self):
+        """The most recent architecture audit payload (parsed), or None."""
+        import json as _json
+        row = self._query_one(
+            "SELECT * FROM arch_audit ORDER BY id DESC LIMIT 1")
+        if not row or not row['payload_json']:
+            return None
+        return {'payload': _json.loads(row['payload_json']),
+                'graph_hash': row['graph_hash']}
+
+    def save_arch_module_review(self, module_name, parsed, graph_hash=None):
+        """Tier-1: one module's grounded LLM analysis."""
+        import json as _json
+        self._execute(
+            "INSERT INTO arch_module_review (module_name, parsed_json, "
+            "graph_hash) VALUES (?, ?, ?)",
+            (module_name, _json.dumps(parsed) if parsed else None, graph_hash))
+
+    def get_arch_module_reviews(self):
+        """Latest Tier-1 analysis per module."""
+        return self._query_all("""
+            SELECT r.* FROM arch_module_review r
+            INNER JOIN (
+                SELECT module_name, MAX(id) AS max_id
+                FROM arch_module_review GROUP BY module_name
+            ) latest ON r.id = latest.max_id
+            ORDER BY r.module_name
+        """)
+
+    def delete_arch(self):
+        self._execute("DELETE FROM arch_audit")
+        self._execute("DELETE FROM arch_module_review")

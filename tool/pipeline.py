@@ -226,6 +226,10 @@ class Pipeline:
             self.db.delete_all_tasks()
             print("  [reset] Cleared all data (scan + review)")
         elif step == 'review':
-            self.db.delete_design_critic()
-            print("  [reset] Cleared design review")
+            # Clear only the pass-2 synthesis; keep per-subtree pass-1
+            # results so this re-run RESUMES the unfinished subtrees
+            # instead of redoing everything (the graph fingerprint drops
+            # any that are stale).
+            self.db.delete_design_module()
+            print("  [reset] Cleared module synthesis; subtrees resume")
         return True
