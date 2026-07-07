@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 from .config import (
     LLM_API_FORMAT, LLM_API_URL, LLM_API_KEY, LLM_MODEL,
-    LLM_FALLBACK_MODELS
+    LLM_FALLBACK_MODELS, LLM_TIMEOUT
 )
 
 
@@ -196,14 +196,18 @@ class LLMClient:
             url, data=json.dumps(body).encode("utf-8"),
             headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as resp:
                 return json.loads(resp.read().decode("utf-8")), None, None
         except urllib.error.HTTPError as e:
             return (None,
                     f"HTTP {e.code}: {e.read().decode('utf-8','replace')[:200]}",
                     e.code)
-        except urllib.error.URLError as e:
-            return None, f"network: {e.reason}", None
+        except (TimeoutError, urllib.error.URLError, OSError) as e:
+            # A read timeout during getresponse() raises a bare TimeoutError
+            # (OSError, NOT URLError), so it must be caught explicitly or it
+            # crashes the whole agent loop instead of degrading.
+            reason = getattr(e, "reason", e)
+            return None, f"network/timeout ({LLM_TIMEOUT}s): {reason}", None
         except (json.JSONDecodeError, KeyError, IndexError) as e:
             return None, f"parse: {e}", None
 
@@ -329,7 +333,7 @@ class LLMClient:
 
         try:
             print(f"    → API call: {model} @ {self.api_url}")
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
                 content = data["choices"][0]["message"]["content"]
                 self._answered_by = model      # may be a fallback model
@@ -350,8 +354,13 @@ class LLMClient:
                 print(f"  ✗ All models rate-limited (429), cannot continue")
             print(f"  ✗ API error {e.code}: {error_body[:200]}")
             return None
-        except urllib.error.URLError as e:
-            print(f"  ✗ Network error: {e.reason}")
+        except (TimeoutError, urllib.error.URLError, OSError) as e:
+            # A read timeout raises a bare TimeoutError (OSError, NOT
+            # URLError) — catching only URLError let it crash the run. Now
+            # it degrades: this call returns None and the caller skips it.
+            print(f"  ✗ Network/timeout after {LLM_TIMEOUT}s: "
+                  f"{getattr(e, 'reason', e)} "
+                  f"(raise LLM_TIMEOUT if your endpoint is just slow)")
             return None
         except (json.JSONDecodeError, KeyError, IndexError) as e:
             print(f"  ✗ Failed to parse API response: {e}")
@@ -420,7 +429,7 @@ class LLMClient:
 
         try:
             print(f"    → Anthropic API call: {model} @ {self.api_url}")
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
                 # Anthropic response format: {"content": [{"type":"text","text":"..."}], "usage": {...}}
                 content = data["content"][0]["text"]
@@ -441,8 +450,10 @@ class LLMClient:
                 print(f"  ✗ All models rate-limited (429), cannot continue")
             print(f"  ✗ Anthropic API error {e.code}: {error_body[:300]}")
             return None
-        except urllib.error.URLError as e:
-            print(f"  ✗ Network error: {e.reason}")
+        except (TimeoutError, urllib.error.URLError, OSError) as e:
+            print(f"  ✗ Network/timeout after {LLM_TIMEOUT}s: "
+                  f"{getattr(e, 'reason', e)} "
+                  f"(raise LLM_TIMEOUT if your endpoint is just slow)")
             return None
         except (json.JSONDecodeError, KeyError, IndexError) as e:
             print(f"  ✗ Failed to parse Anthropic response: {e}")

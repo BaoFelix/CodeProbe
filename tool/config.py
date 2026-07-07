@@ -65,3 +65,12 @@ LLM_FALLBACK_MODELS = [
     os.environ.get("LLM_FALLBACK_MODELS",
                    "gpt-4o,gpt-4o-mini,Meta-Llama-3.1-405B-Instruct,Phi-4").split(",")
 ]
+
+# Per-request read timeout (seconds). Slow enterprise endpoints or big
+# design-review prompts can exceed the default — raise LLM_TIMEOUT if you
+# hit read timeouts. A timeout degrades gracefully (that call is skipped),
+# it no longer crashes the run.
+try:
+    LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
+except ValueError:
+    LLM_TIMEOUT = 120

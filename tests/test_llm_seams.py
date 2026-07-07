@@ -133,6 +133,48 @@ class TestBatchGenerateResilience:
         assert db.llm_cache_get(llm._prompt_hash("q", ""), "primary") \
             == "good answer"
 
+    def test_read_timeout_degrades_not_crashes(self, monkeypatch):
+        # A read timeout raises a bare TimeoutError (OSError, not URLError).
+        # The batch path — what `analyze`'s design review uses — must return
+        # None and let the caller skip, not crash the whole run.
+        import tool.llm as llm_mod
+
+        def boom(*a, **k):
+            raise TimeoutError("The read operation timed out")
+        monkeypatch.setattr(llm_mod.urllib.request, "urlopen", boom)
+        llm = LLMClient(api_url="http://x", api_key="k", model="m",
+                        api_format="openai")
+        assert llm._api_call_openai("prompt") is None      # no exception
+        assert llm.generate("prompt") is None              # full path, no crash
+
+    def test_anthropic_read_timeout_degrades(self, monkeypatch):
+        import tool.llm as llm_mod
+        monkeypatch.setattr(llm_mod.urllib.request, "urlopen",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                TimeoutError("timed out")))
+        llm = LLMClient(api_url="http://x", api_key="k", model="m",
+                        api_format="anthropic")
+        assert llm.generate("prompt") is None
+
+    def test_tool_use_read_timeout_degrades(self, monkeypatch):
+        import tool.llm as llm_mod
+        monkeypatch.setattr(llm_mod.urllib.request, "urlopen",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                TimeoutError("timed out")))
+        llm = LLMClient(api_url="http://x", api_key="k", model="m",
+                        api_format="openai")
+        r = llm.generate_with_tools([{"role": "user", "content": "hi"}], [])
+        assert not r.tool_calls and "LLM error" in r.text
+
+    def test_timeout_is_configurable(self, monkeypatch):
+        monkeypatch.setenv("LLM_TIMEOUT", "300")
+        import importlib
+        import tool.config as cfg
+        importlib.reload(cfg)
+        assert cfg.LLM_TIMEOUT == 300
+        monkeypatch.delenv("LLM_TIMEOUT")
+        importlib.reload(cfg)
+
     def test_malformed_200_degrades_not_crashes(self):
         # empty choices list from a filtering proxy must not kill the loop
         llm = make_openai({"choices": []})

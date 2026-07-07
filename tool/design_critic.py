@@ -234,6 +234,7 @@ class DesignCriticAgent(BaseAgent):
         # ── Pass 1: subtree analysis ──────────────────────────
         print(f"  [pass 1] {len(roots)} subtree(s) to analyze…")
         subtree_results = []
+        consecutive_failures = 0
         for root in roots:
             folded_names = _collect_subtree(C, root)
             concrete_qnames = _expand_to_concrete(folded_names, rep_map)
@@ -256,8 +257,22 @@ class DesignCriticAgent(BaseAgent):
             parsed = _safe_parse_json(response)
             self.db.save_design_subtree(label[root], prompt, response, parsed)
             subtree_results.append({'root': label[root], 'result': parsed})
-            print(f"    ✓ {label[root]} "
-                  f"({len(parsed.get('pains', [])) if parsed else 0} pains)")
+
+            # Circuit breaker: if the LLM is unreachable (every call returns
+            # None — timeout / network / auth), don't grind through all N
+            # subtrees waiting the full timeout each. Bail after 3 in a row
+            # with a clear cause instead of a 30-minute empty run.
+            if response is None:
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    print("  ✗ LLM unreachable (3 calls failed in a row). "
+                          "Aborting review — check LLM_API_URL / LLM_API_KEY, "
+                          "or raise LLM_TIMEOUT if the endpoint is just slow.")
+                    return False
+            else:
+                consecutive_failures = 0
+                print(f"    ✓ {label[root]} "
+                      f"({len(parsed.get('pains', [])) if parsed else 0} pains)")
 
         # ── Pass 2: module synthesis ──────────────────────────
         print(f"  [pass 2] module synthesis…")

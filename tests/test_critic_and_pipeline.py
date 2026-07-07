@@ -40,6 +40,33 @@ class TestSubtreeCollection:
         assert {"Garage::A", "Garage::B", "Root"} <= concrete
 
 
+class TestReviewCircuitBreaker:
+    def test_aborts_after_three_consecutive_llm_failures(self, tmp_path):
+        # An unreachable LLM (every generate() returns None) must abort the
+        # review after 3 failures, not grind through every subtree.
+        from tool.agents import ScannerAgent
+        from tool.design_critic import DesignCriticAgent
+        from tool.db import DBManager
+        from tool.source_io import SourceReader
+
+        db = DBManager(tmp_path / "t.db")
+        db.ensure_tables()
+
+        class DeadLLM:
+            calls = 0
+
+            def generate(self, prompt, system_prompt="", tag=""):
+                DeadLLM.calls += 1
+                return None                     # simulate persistent timeout
+
+        reader = SourceReader("test_src", db=db)
+        ScannerAgent(llm=DeadLLM(), db=db, reader=reader).run("test_src")
+        dead = DeadLLM()
+        ok = DesignCriticAgent(llm=dead, db=db, reader=reader).run()
+        assert ok is False                      # aborted, didn't crash
+        assert DeadLLM.calls <= 3 + 1           # stopped ~3 in, not all subtrees
+
+
 class TestSafeParseJson:
     def test_fenced_json(self):
         assert _safe_parse_json('```json\n{"a": 1}\n```') == {"a": 1}

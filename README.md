@@ -144,6 +144,9 @@ Useful environment switches:
 
 - `LLM_FALLBACK_MODELS` — comma-separated fallback chain used automatically
   on 429 rate limits.
+- `LLM_TIMEOUT` — per-request read timeout in seconds (default 120). Raise
+  it for slow enterprise endpoints; a timeout now skips that call and
+  continues instead of crashing the run.
 - `LLM_NO_CACHE=1` — bypass the LLM response cache (useful while tuning
   prompts).
 
