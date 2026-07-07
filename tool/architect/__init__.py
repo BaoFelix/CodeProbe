@@ -15,6 +15,7 @@ from .decouple import plan_decoupling, format_plans, DecouplePlan, Cut
 from .baseline import (load_baseline, save_baseline, partition,
                        resolved_keys, DEFAULT_BASELINE_NAME)
 from .persist import audit_payload
+from .arch_review import ArchitectReviewer, synthesize_conclusion
 
 __all__ = [
     "run_architecture_audit", "format_findings",
@@ -24,4 +25,5 @@ __all__ = [
     "plan_decoupling", "format_plans", "DecouplePlan", "Cut",
     "load_baseline", "save_baseline", "partition", "resolved_keys",
     "DEFAULT_BASELINE_NAME", "audit_payload",
+    "ArchitectReviewer", "synthesize_conclusion",
 ]

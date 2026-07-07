@@ -584,6 +584,14 @@ class DBManager:
             ORDER BY r.module_name
         """)
 
+    def delete_arch_reviews(self):
+        """Clear the LLM architecture review (Tier-1 per-module + Tier-2
+        conclusion), keeping the deterministic audit so --from=review only
+        re-runs the LLM step."""
+        self._execute("DELETE FROM arch_module_review")
+        self._execute("DELETE FROM design_critic_module "
+                      "WHERE module_name = 'architecture'")
+
     def delete_arch(self):
         self._execute("DELETE FROM arch_audit")
-        self._execute("DELETE FROM arch_module_review")
+        self.delete_arch_reviews()

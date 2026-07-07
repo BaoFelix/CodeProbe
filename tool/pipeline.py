@@ -39,6 +39,8 @@ class Pipeline:
                                     reader=self.reader)
         self.critic = DesignCriticAgent(llm=self.llm, db=self.db,
                                         reader=self.reader)
+        from .architect import ArchitectReviewer
+        self.arch_reviewer = ArchitectReviewer(llm=self.llm, db=self.db)
 
     # ─── Project initialization ─────────────────────────────────────────
 
@@ -51,7 +53,7 @@ class Pipeline:
         self.db = DBManager(DB_PATH)
         self.db.ensure_tables()
 
-        for agent in (self.scanner, self.critic):
+        for agent in (self.scanner, self.critic, self.arch_reviewer):
             agent.db = self.db
 
         print(f"  ✓ Project initialized (DB reset)")
@@ -120,9 +122,13 @@ class Pipeline:
     # ─── Unified orchestration interface ─────────────────────────────────
 
     def run_full_analysis(self, path, from_step=None):
-        """Full pipeline: scan → design review.
-        Supports incremental execution: skip steps with existing DB results.
-        from_step: re-run from a specific step (scan / review).
+        """Architecture-first pipeline:
+          1. Scan sources into the graph.
+          2. Deterministic architecture audit + decoupling plans (persisted).
+          3. Architecture-level LLM review (grounded, concurrent per module).
+        Class-level design review is now on-demand (the `design_review`
+        tool), not part of the default run.
+        from_step re-runs from: scan / review (review = step 3 onward).
         """
         path = Path(path).resolve()
 
@@ -137,16 +143,10 @@ class Pipeline:
         self.db.ensure_tables()
 
         if from_step and not self._reset_from_step(from_step):
-            # Invalid --from value: abort loudly. Continuing would skip
-            # both steps as "already exists" and end with a summary that
-            # looks like a successful re-run the user never asked for.
             return False
 
         # === Step 1: Scan ===
-        print(f"\n{'='*60}")
-        print(f"  Step 1/2: Scanning source files...")
-        print(f"{'='*60}")
-
+        print(f"\n{'='*60}\n  Step 1/3: Scanning source files...\n{'='*60}")
         existing = self.db.get_classes()
         if existing:
             print(f"  [skip] Already have {len(existing)} classes in DB")
@@ -157,19 +157,38 @@ class Pipeline:
                 print("  Error: No classes found after scanning.")
                 return False
 
-        # === Step 2: Holistic design review ===
-        print(f"\n{'='*60}")
-        print(f"  Step 2/2: Holistic design review...")
-        print(f"{'='*60}")
+        # === Step 2: Deterministic architecture audit (no LLM key needed) ==
+        print(f"\n{'='*60}\n  Step 2/3: Architecture audit + decoupling...\n{'='*60}")
+        self._run_architecture_audit()
 
-        if self.db.get_design_module():
-            print(f"  [skip] Design review already exists "
-                  f"(use --from=review to re-run)")
-        elif not self.critic.run():
-            return False
+        # === Step 3: Architecture-level LLM review (grounded) ===
+        print(f"\n{'='*60}\n  Step 3/3: Architecture review (grounded)...\n{'='*60}")
+        if self.db.get_arch_module_reviews():
+            print("  [skip] Architecture review exists (use --from=review "
+                  "to re-run)")
+        else:
+            self.arch_reviewer.run()      # degrades gracefully without a key
 
         self._print_summary()
         return True
+
+    def _run_architecture_audit(self):
+        """Step 2: deterministic module audit + decoupling plans → DB.
+        No LLM; the report and Step 3 read what this persists."""
+        from .architect import (run_architecture_audit, plan_decoupling,
+                                audit_payload)
+        from .db import graph_fingerprint
+        classes = [dict(r) for r in self.db.get_classes()]
+        rels = [dict(r) for r in self.db.get_relationships()]
+        findings, mg = run_architecture_audit(classes, rels)
+        unresolved_pct = (round(100.0 * sum(1 for r in rels
+                                            if not r["target_qname"]) / len(rels), 1)
+                          if rels else None)
+        payload = audit_payload(findings, mg, plan_decoupling(mg), unresolved_pct)
+        self.db.save_arch_audit(payload, graph_hash=graph_fingerprint(rels))
+        print(f"  ✓ {payload['module_count']} modules, "
+              f"{len(payload['findings'])} finding(s), "
+              f"{len(payload['decoupling'])} decoupling plan(s)")
 
     def generate_report(self):
         """Generate HTML visualization report."""
@@ -223,13 +242,13 @@ class Pipeline:
 
         if step == 'scan':
             self.db.delete_design_critic()
+            self.db.delete_arch()
             self.db.delete_all_tasks()
             print("  [reset] Cleared all data (scan + review)")
         elif step == 'review':
-            # Clear only the pass-2 synthesis; keep per-subtree pass-1
-            # results so this re-run RESUMES the unfinished subtrees
-            # instead of redoing everything (the graph fingerprint drops
-            # any that are stale).
-            self.db.delete_design_module()
-            print("  [reset] Cleared module synthesis; subtrees resume")
+            # Step 3 is the architecture review; clear it (Tier-1 per-module
+            # + Tier-2 conclusion) so it re-runs. The deterministic audit
+            # (Step 2) always regenerates anyway.
+            self.db.delete_arch_reviews()
+            print("  [reset] Cleared architecture review")
         return True
