@@ -52,6 +52,28 @@ class TestBuildPayload:
             if isinstance(payload["arch"], list) else set()
         assert "Ghost" not in arch_names
 
+    def test_external_types_hidden_from_graph(self, tmp_path):
+        # Gamma references an SDK type never defined in scope (SdkWidget).
+        # The relationship is mined, but the report must not render the
+        # external node nor any edge to it — internal→internal only.
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "G.hxx").write_text("""
+class Gamma { public: void Use() { SdkWidget* w = MakeWidget(); } };
+""")
+        db = DBManager(tmp_path / "t.db")
+        db.ensure_tables()
+        ScannerAgent(llm=LLMClient(cache=db), db=db,
+                     reader=SourceReader(str(src), db=db)).run(str(src))
+        payload = build_payload(db)
+        node_ids = {n["id"] for n in payload["graph"]["nodes"]}
+        assert "SdkWidget" not in node_ids            # external never rendered
+        assert all(n["is_external"] == 0
+                   for n in payload["graph"]["nodes"])
+        # no edge points at a node outside the rendered set
+        for e in payload["graph"]["edges"]:
+            assert e["source"] in node_ids and e["target"] in node_ids
+
     def test_multi_edge_collapses_to_strongest_primary(self, tmp_path):
         payload = build_payload(_scan_fixture(tmp_path))
         edges = [e for e in payload["graph"]["edges"]

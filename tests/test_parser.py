@@ -41,6 +41,28 @@ void Factory::Make() {
         assert not names & {"double", "nullptr", "std", "make_shared",
                             "MAX_COUNT", "Make"}
 
+    def test_pointer_and_reference_returning_methods_are_mined(self, tmp_path):
+        # `Graph* Foo::bar()` wraps the function_declarator in a
+        # pointer_declarator; if the query only matched direct children,
+        # every pointer/reference-returning method (and its body calls)
+        # vanished. Here bar() returns a pointer and statically calls
+        # Helper::make — that edge must appear.
+        src = tmp_path / "F.cxx"
+        src.write_text("""
+class Graph {}; class Widget {};
+class Helper { public: static void make(); };
+class Foo {
+public:
+    Graph* bar() { Helper::make(); Widget w; (void)w; }
+    Widget& ref();
+};
+""")
+        _, rels = parse_file(str(src))
+        body = _by_via(rels, "body_call")
+        targets = {r.target_name for r in body if r.source_qname == "Foo"}
+        assert "Helper" in targets      # static call inside a pointer-return method
+        assert "Widget" in targets      # local inside it
+
     def test_member_calls_are_not_mined(self, tmp_path):
         # m_engine->Start() is coupling ALREADY captured by the field edge;
         # mining it again would double-count. The body miner must skip it.

@@ -111,17 +111,28 @@ _CONTAINER_QUERY = Query(CPP, """
 #   (a) regular member decl:  void Open();         → field_declaration
 #   (b) ctor/dtor decl:       Workshop(); ~W();    → declaration (no return type)
 #   (c) inline definition:    void Open() {…}      → function_definition
-_METHOD_IN_CLASS_QUERY = Query(CPP, """
-    (field_declaration
-        (function_declarator
-            declarator: (_) @name)) @decl
-    (declaration
-        (function_declarator
-            declarator: (_) @name)) @decl
-    (function_definition
-        (function_declarator
-            declarator: (_) @name)) @decl
-""")
+# A method's function_declarator is NOT always a direct child of its
+# declaration: a pointer/reference RETURN TYPE (`Graph* Foo::bar()`,
+# `Widget& Foo::ref()`, `Thing** Foo::pp()`) wraps it in one or more
+# pointer_declarator / reference_declarator nodes. Missing these silently
+# drops every pointer-returning method — extremely common in real C++
+# (factories, accessors) — losing its signature AND its body-call edges.
+# So each of the three outer forms is matched at the direct, *, ** and &
+# nesting levels.
+def _method_query():
+    outers = ('field_declaration', 'declaration', 'function_definition')
+    wraps = (
+        '(function_declarator declarator: (_) @name)',
+        '(pointer_declarator (function_declarator declarator: (_) @name))',
+        '(pointer_declarator (pointer_declarator '
+            '(function_declarator declarator: (_) @name)))',
+        '(reference_declarator (function_declarator declarator: (_) @name))',
+    )
+    return Query(CPP, "\n".join(
+        f"({o} {w}) @decl" for o in outers for w in wraps))
+
+
+_METHOD_IN_CLASS_QUERY = _method_query()
 
 # ── Query 3: fields (non-method members) ─────────────────────
 # A field_declaration with a non-function declarator. Field name lives
@@ -815,7 +826,10 @@ def _ancestor_types(node):
 #     functions were fabricating methods under a phantom 'std' class).
 # v7: merge bare vs namespaced duplicate classes (.cxx `using namespace`
 #     out-of-line methods / .sch schemas) into their namespaced counterpart.
-PARSER_VERSION = 7
+# v8: match pointer/reference-returning methods (Graph* Foo::bar()) —
+#     their function_declarator is wrapped in pointer/reference_declarator,
+#     so signatures + body-call edges were being dropped for all of them.
+PARSER_VERSION = 8
 
 
 _CPP_EXTS = {'.h', '.hxx', '.hpp', '.cxx', '.cpp', '.c'}

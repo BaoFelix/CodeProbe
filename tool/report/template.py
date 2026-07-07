@@ -199,7 +199,7 @@ _HTML = r"""<!DOCTYPE html>
     <span><b>△</b> inherits</span><span><b>┄△</b> implements</span>
     <span><b>◆</b> composes</span><span><b>◇</b> aggregates</span>
     <span><b>→</b> associates</span><span><b>┄→</b> depends</span>
-    <span style="color:var(--util)"><b>┄ ┄</b> external type</span>
+    <span class="hint">(the project's own classes only — external SDK types hidden)</span>
   </div>
   <div class="graph" id="cy-rel"></div>
 </section>

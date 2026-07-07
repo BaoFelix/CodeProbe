@@ -219,7 +219,11 @@ def _root_of(C, cid):
 def _build_graph_payload(g, db, roots, label, C, orch_name, utilities, phantoms):
     """One UML class-diagram dataset shared by both graph sections.
 
-    nodes  — internal classes + external domain types (dashed boxes).
+    nodes  — the project's own classes only. External / third-party types
+             (unresolved targets: SDK types, std, forward-declared externals)
+             are NOT shown — they add hundreds of dashed leaf nodes and
+             drown the actual architecture. Only edges between two internal
+             classes are kept.
     edges  — one per (src,tgt) pair, carrying:
                primary   : the strongest relationship kind (UML notation)
                kinds     : every kind between the pair (edge label)
@@ -245,32 +249,18 @@ def _build_graph_payload(g, db, roots, label, C, orch_name, utilities, phantoms)
 
     from collections import defaultdict
     pair = defaultdict(list)
-    ext_seen = set()
     for r in db.get_relationships():
         src = r['source_qname']
-        if src not in internal:
-            continue
-        if r['target_qname']:
-            tgt = r['target_qname']
-        else:
-            name = r['target_name']
-            if _is_noise_external(name):
-                continue
-            tgt = '(ext) ' + name
-            ext_seen.add(name)
-        if src == tgt:
+        tgt = r['target_qname']
+        # internal → internal only: skip unresolved (external) targets and
+        # anything that isn't one of our own in-scope classes.
+        if src not in internal or tgt not in internal or src == tgt:
             continue
         pair[(src, tgt)].append({
             'kind': r['kind'], 'level': r['level'],
             'evidence_file': r['evidence_file'],
             'evidence_line': r['evidence_line'],
             'evidence_text': r['evidence_text'],
-        })
-
-    for name in sorted(ext_seen):
-        nodes.append({
-            'id': '(ext) ' + name, 'label': name, 'qname': name,
-            'kind': 'external', 'is_orch': 0, 'is_util': 0, 'is_external': 1,
         })
 
     edges = []
