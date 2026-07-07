@@ -125,6 +125,9 @@ _HTML = r"""<!DOCTYPE html>
 
   /* Section 3 */
   .review{padding:8px 12px 14px;}
+  .arch-summary{margin:8px 6px 4px;padding:12px 14px;background:#eef6ff;
+                border:1px solid #cfe3ff;border-radius:6px;font-size:13px;
+                line-height:1.5;color:#1e3a5f;}
   .review h3{margin:14px 6px 6px;font-size:12px;font-weight:700;color:var(--muted);
              text-transform:uppercase;letter-spacing:.06em;}
   details.item{border:1px solid var(--line);border-radius:6px;margin:6px 0;background:#fcfcfd;}
@@ -545,34 +548,63 @@ function makeGraph(containerId, edgePred){
 /* Section 3: all relations, UML */
 makeGraph('cy-rel', e=>true);
 
-/* Section 3: design review */
+/* Section 4: design review — architecture-level first, then class-level
+   (the latter only if the on-demand class review was run). */
 (function(){
   const root=document.getElementById('review');
   const R=DATA.review||{high_level:[],class_level:[]};
   let html='';
 
-  html+='<h3>High-level design issues</h3>';
-  if((R.high_level||[]).length){
-    for(const p of R.high_level){
-      const pri=p.priority==='high'?'high':p.priority==='medium'?'med':p.priority==='low'?'low':'info';
-      html+=`<details class="item"><summary><span class="pill ${pri}">${esc(p.priority||'info')}</span>`;
-      html+=`<span>${esc(p.title)}</span></summary><div class="content">${renderKV(p.details)}</div></details>`;
-    }
-  } else html+='<div class="empty">No design review yet. Configure <code>LLM_API_KEY</code> in <code>.env</code> and run <code>python run.py analyze &lt;path&gt;</code> to generate it. Sections 1–2 above work without an LLM.</div>';
-
-  html+='<h3>Class- / function-level issues</h3>';
-  if((R.class_level||[]).length){
-    for(const c of R.class_level){
-      html+=`<details class="item"><summary><span>${esc(c.short)}</span>`;
-      html+=`<span class="essence">${esc(c.essence)}</span></summary><div class="content">`;
-      for(const pain of c.pains){
-        html+=`<details class="sub"><summary>`;
-        if(pain.category) html+=`<span class="pill cat">${esc(pain.category)}</span>`;
-        html+=`<span>${esc(pain.title)}</span></summary><div class="content">${renderKV(pain.details)}</div></details>`;
+  // ── Architecture review (Tier-2 conclusion + Tier-1 per-module) ──
+  const A=R.architecture;
+  if(A){
+    if(A.summary) html+=`<div class="arch-summary">${esc(A.summary)}</div>`;
+    if((A.priorities||[]).length){
+      html+='<h3>Top priorities</h3>';
+      for(const p of A.priorities){
+        html+=`<details class="item" open><summary><span class="pill high">priority</span>`;
+        html+=`<span>${esc(p.title)}</span></summary><div class="content">`;
+        html+=renderKV([{label:'why',text:p.why},
+                        {label:'modules',text:(p.modules||[]).join(', ')}]);
+        html+='</div></details>';
       }
-      html+=`</div></details>`;
     }
-  } else html+='<div class="empty">No class- or function-level issues found.</div>';
+    if((A.modules||[]).length){
+      html+='<h3>Per-module assessment</h3>';
+      for(const m of A.modules){
+        html+=`<details class="item"><summary><span>${esc(m.module)}</span>`;
+        html+=`<span class="essence">${esc(m.role)}</span></summary><div class="content">`;
+        html+=renderKV([{label:'assessment',text:m.assessment},
+                        {label:'recommendation',text:m.recommendation}]);
+        for(const r of (m.risks||[]))
+          html+=`<div class="kv"><span class="label">risk</span><span>${esc(r)}</span></div>`;
+        html+='</div></details>';
+      }
+    }
+  } else {
+    html+='<div class="empty">No architecture review yet. Configure '+
+      '<code>LLM_API_KEY</code> and run <code>python run.py analyze &lt;path&gt;</code>. '+
+      'Sections 1–3 above work without an LLM.</div>';
+  }
+
+  // ── Class-level (only present if the on-demand class review ran) ──
+  if((R.high_level||[]).length || (R.class_level||[]).length)
+    html+='<h3>Class-level design review</h3>';
+  for(const p of (R.high_level||[])){
+    const pri=p.priority==='high'?'high':p.priority==='medium'?'med':p.priority==='low'?'low':'info';
+    html+=`<details class="item"><summary><span class="pill ${pri}">${esc(p.priority||'info')}</span>`;
+    html+=`<span>${esc(p.title)}</span></summary><div class="content">${renderKV(p.details)}</div></details>`;
+  }
+  for(const c of (R.class_level||[])){
+    html+=`<details class="item"><summary><span>${esc(c.short)}</span>`;
+    html+=`<span class="essence">${esc(c.essence)}</span></summary><div class="content">`;
+    for(const pain of c.pains){
+      html+=`<details class="sub"><summary>`;
+      if(pain.category) html+=`<span class="pill cat">${esc(pain.category)}</span>`;
+      html+=`<span>${esc(pain.title)}</span></summary><div class="content">${renderKV(pain.details)}</div></details>`;
+    }
+    html+=`</div></details>`;
+  }
 
   root.innerHTML=html;
   function renderKV(details){

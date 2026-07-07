@@ -58,7 +58,7 @@ python run.py report         # → outputs/report.html, open in any browser
 | Command | Description |
 |---------|-------------|
 | `init` | Initialize / reset the database |
-| `analyze <path>` | Fixed pipeline: scan → design review. `<path>` is a directory (a file argument scans its parent directory) |
+| `analyze <path>` | Architecture-first pipeline: scan → deterministic audit → architecture-level LLM review. `<path>` is a directory (a file argument scans its parent directory) |
 | `audit [path]` | Architecture audit + decoupling plan — deterministic, **no LLM key needed**. `--baseline` freezes current findings as accepted debt; `--check` gates CI on new ones (exit 1) |
 | `chat` | Talk to the codebase — an agentic loop that picks tools from your question (needs an LLM API key) |
 | `status` | Show analysis progress dashboard |
@@ -85,9 +85,12 @@ Two altitudes, picked by your question:
   (minimum feedback set), the mechanism (dependency inversion / extract
   shared base), the exact `file:line` references to change, and a
   build-safe refactor order. All of it is deterministic (graph algorithms;
-  every finding carries evidence); the LLM only explains it. For a
-  key-free run of the same checks use `python run.py audit <path>`.
-- **Class level** — the two-pass design review (per-class critique).
+  every finding carries evidence); the LLM only explains it. Ask for the
+  big picture and `architecture_conclusion` runs an accumulative loop that
+  weaves the per-module analyses into one prioritized system verdict. For a
+  key-free run of the deterministic checks use `python run.py audit <path>`.
+- **Class level** — the two-pass design review, now on-demand via the
+  `design_review` tool (per-class critique) when you want to drill in.
 
 ### Options
 
@@ -105,20 +108,18 @@ are excluded automatically.
 
 ```
  C++ sources (partial is fine)
-      │
+      │  ts_parser.py — tree-sitter → entities + 6 relationship kinds
       ▼
- ts_parser.py      tree-sitter → entities + 6 relationship kinds
-      │            (signatures, fields, inheritance, body-call usage)
-      ▼
- db.py             SQLite = shared memory between all stages
+ db.py — SQLite blackboard (shared memory between all stages)
       │
-      ├────────────────────┬─────────────────────┐
-      ▼                    ▼                     ▼
- workflow.py          design_critic.py      architect/
- graph analysis       two-pass LLM review   module audit +
-      │                    │                decoupling plans
-      └─────────┬──────────┴─────────────────────┘
-                ▼
+   analyze pipeline:
+   1. scan            ScannerAgent + workflow.py graph analysis
+   2. architecture    architect/ — deterministic module audit + decoupling
+      audit           plans (persisted, NO LLM key needed)
+   3. architecture    architect/arch_review.py — grounded LLM review:
+      review          Tier-1 concurrent per-module, Tier-2 accumulative
+      │               global conclusion (on demand). Class-level design
+      ▼               review is now the on-demand `design_review` tool.
  report/ · chat (host.py) · MCP — three ways to consume the same tools
 ```
 
@@ -147,6 +148,8 @@ Useful environment switches:
 - `LLM_TIMEOUT` — per-request read timeout in seconds (default 120). Raise
   it for slow enterprise endpoints; a timeout now skips that call and
   continues instead of crashing the run.
+- `LLM_MAX_WORKERS` — concurrency of the per-module / per-subtree review
+  fan-out (default 6). Total wait ≈ ceil(N/workers) × LLM_TIMEOUT.
 - `LLM_NO_CACHE=1` — bypass the LLM response cache (useful while tuning
   prompts).
 

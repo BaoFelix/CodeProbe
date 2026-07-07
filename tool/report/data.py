@@ -314,6 +314,29 @@ def _entity_kind_phantom(db, qname):
 
 # ── Section 3: design review ────────────────────────────────────
 
+def _build_arch_review(db):
+    """The architecture-level LLM review: the Tier-2 global conclusion +
+    the Tier-1 per-module assessments. None if neither has run."""
+    out = {'summary': '', 'priorities': [], 'modules': []}
+    concl = db.get_design_module('architecture')
+    if concl and concl['parsed_json']:
+        c = json.loads(concl['parsed_json'])
+        out['summary'] = c.get('summary', '')
+        out['priorities'] = c.get('priorities', [])
+    for r in db.get_arch_module_reviews() or []:
+        if not r['parsed_json']:
+            continue
+        m = json.loads(r['parsed_json'])
+        out['modules'].append({
+            'module': r['module_name'],
+            'role': m.get('role', ''),
+            'assessment': m.get('assessment', ''),
+            'risks': m.get('risks', []) or [],
+            'recommendation': m.get('recommendation', ''),
+        })
+    return out if (out['summary'] or out['modules']) else None
+
+
 def _build_review(db):
     high_level = []
     class_level = []
@@ -377,7 +400,8 @@ def _build_review(db):
             } for p in pains],
         })
 
-    return {'high_level': high_level, 'class_level': class_level}
+    return {'architecture': _build_arch_review(db),
+            'high_level': high_level, 'class_level': class_level}
 
 
 # ── helpers ─────────────────────────────────────────────────────

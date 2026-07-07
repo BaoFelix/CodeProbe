@@ -360,6 +360,34 @@ def _architecture_audit(ctx, strategy="auto", verify=False, baseline="off"):
     return prefix + format_findings(findings, mg)
 
 
+def _architecture_conclusion(ctx):
+    """The coherent, global architecture design conclusion. Runs the
+    accumulative agent loop (Tier 2): it REUSES the per-module analyses
+    from the DB (running/resuming Tier 1 first if needed) and weaves them
+    into one prioritized system-level verdict — each module judged in the
+    running context of the whole. Needs an LLM key and a prior audit."""
+    if not ctx.db.get_arch_audit():
+        return "No architecture audit yet. Run architecture_audit first."
+    if not _llm_ready(ctx):
+        return ("The global conclusion needs an LLM (set LLM_API_KEY). The "
+                "deterministic findings are available via architecture_audit.")
+    from .architect import ArchitectReviewer, synthesize_conclusion
+    ArchitectReviewer(ctx.llm, ctx.db).run()      # ensure/resume Tier-1
+    result = synthesize_conclusion(ctx.llm, ctx.db)
+    if not result:
+        return "Could not synthesize a conclusion (no module reviews)."
+    lines = ["# Architecture conclusion", result["summary"], ""]
+    if result.get("priorities"):
+        lines.append("Priorities:")
+        for i, p in enumerate(result["priorities"], 1):
+            mods = ", ".join(p.get("modules", []))
+            lines.append(f"  {i}. {p.get('title', '')}"
+                         + (f"  [{mods}]" if mods else ""))
+            if p.get("why"):
+                lines.append(f"     why: {p['why']}")
+    return "\n".join(lines)
+
+
 def _decoupling_plan(ctx, strategy="auto"):
     """Turn each module cycle into an ordered surgical plan: which edge to
     cut (minimum feedback set — the cheapest cut), how to cut it (dependency
@@ -426,6 +454,14 @@ def build_registry(ctx: ToolContext) -> dict:
                                     "description": "off|update|check — CI ratchet: "
                                     "freeze legacy debt, gate only new findings"}}),
                  _architecture_audit),
+        ToolSpec("architecture_conclusion",
+                 "The coherent GLOBAL architecture design verdict: an "
+                 "accumulative loop weaves the per-module analyses into one "
+                 "prioritized system-level conclusion (each module judged in "
+                 "the context of the whole). Use when the user wants the big "
+                 "picture / overall design assessment, not a single finding. "
+                 "Needs an LLM key + a prior scan/audit.",
+                 _obj(), _architecture_conclusion),
         ToolSpec("decoupling_plan",
                  "For each module cycle, compute a surgical decoupling plan: "
                  "the cheapest edge(s) to cut, the mechanism (dependency "
