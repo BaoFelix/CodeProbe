@@ -44,9 +44,11 @@ _HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <title>CodeProbe</title>
+<!-- Graph libraries from CDN (the only non-embedded pieces). The script
+     below degrades gracefully when they can't load: the workflow tree and
+     the design review render offline; only the diagram needs the CDN.
+     dagre was loaded historically but never used — removed. -->
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.0/dist/cytoscape.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/layout-base@1.0.2/layout-base.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/cose-base@1.0.3/cose-base.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape-cose-bilkent@4.1.0/cytoscape-cose-bilkent.js"></script>
@@ -194,8 +196,13 @@ _HTML = r"""<!DOCTYPE html>
 
 <script>
 const DATA = __PAYLOAD__;
-cytoscape.use(cytoscapeDagre);
-cytoscape.use(cytoscapeCoseBilkent);
+/* Offline resilience: if the CDN was unreachable, the graph libraries are
+   undefined. Everything except the diagram must still render — an
+   unguarded cytoscape.use() here used to throw and kill the whole page,
+   including the pure-HTML tree and review sections. */
+const GRAPH_LIBS_OK = (typeof cytoscape !== 'undefined'
+                       && typeof cytoscapeCoseBilkent !== 'undefined');
+if (GRAPH_LIBS_OK) cytoscape.use(cytoscapeCoseBilkent);
 
 document.getElementById('meta').textContent =
   [DATA.summary.directory,
@@ -270,8 +277,16 @@ function disp(n, prefix){
 }
 
 /* Reusable UML graph with expand/collapse.
-   edgePred: which edges to include. dir: dagre rankDir. */
+   edgePred: which edges to include. */
 function makeGraph(containerId, edgePred){
+  if (!GRAPH_LIBS_OK){
+    const box = document.getElementById(containerId);
+    if (box) box.innerHTML =
+      '<p style="padding:1em;color:var(--muted)">Diagram unavailable ' +
+      'offline (graph libraries load from CDN). The workflow tree and ' +
+      'design review above/below are complete.</p>';
+    return;
+  }
   const G = DATA.graph;
   const edges = G.edges.filter(edgePred);
   const usedNodes = new Set();

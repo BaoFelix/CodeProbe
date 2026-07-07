@@ -196,3 +196,35 @@ class TestVerifier:
         # problem because parsing failed would be the worst failure mode.
         kept = Verifier(CannedLLM("¯\\_(ツ)_/¯")).verify([self._finding()])
         assert len(kept) == 1
+
+    def test_thread_pool_path_keeps_right_subset_in_order(self):
+        # 3+ findings take the ThreadPoolExecutor branch: verdicts must
+        # stay aligned with their findings (ex.map ordering) — drop only
+        # the one the LLM refutes, keep the rest in original order.
+        class PerTitleLLM:
+            api_key = "k"; api_url = "u"
+
+            def generate(self, prompt, system_prompt="", tag=""):
+                if "God module: B" in prompt:
+                    return '{"is_real": false, "reason": "misgrouped"}'
+                return '{"is_real": true}'
+
+        fs = [Finding("r", "god_module", f"God module: {x}", "d", [x], ["e"])
+              for x in ("A", "B", "C")]
+        kept = Verifier(PerTitleLLM()).verify(fs)
+        assert [f.title for f in kept] == ["God module: A", "God module: C"]
+
+    def test_thread_pool_fail_open_on_exception(self):
+        # a worker whose LLM call raises must keep its finding, not lose it
+        class FlakyLLM:
+            api_key = "k"; api_url = "u"
+
+            def generate(self, prompt, system_prompt="", tag=""):
+                if "God module: B" in prompt:
+                    raise RuntimeError("network blip")
+                return '{"is_real": true}'
+
+        fs = [Finding("r", "god_module", f"God module: {x}", "d", [x], ["e"])
+              for x in ("A", "B", "C")]
+        kept = Verifier(FlakyLLM()).verify(fs)
+        assert len(kept) == 3                    # fail-open under concurrency

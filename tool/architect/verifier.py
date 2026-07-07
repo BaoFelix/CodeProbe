@@ -54,7 +54,13 @@ class Verifier:
         prompt = _VERIFY_PROMPT.format(
             title=f.title, detail=f.detail,
             evidence="\n".join(f"  {e}" for e in f.evidence[:8]))
-        parsed = _safe(self.llm.generate(prompt, tag="verify"))
+        try:
+            parsed = _safe(self.llm.generate(prompt, tag="verify"))
+        except Exception:
+            # Fail-open must cover the CALL too, not just the parse: one
+            # network blip inside ex.map would otherwise kill the whole
+            # verify() and lose every finding, not just this one.
+            return True, ""
         if parsed is None:
             return True, ""                       # fail-open
         return bool(parsed.get("is_real", True)), parsed.get("reason", "")
