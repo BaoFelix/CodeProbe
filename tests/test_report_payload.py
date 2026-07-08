@@ -74,6 +74,39 @@ class Gamma { public: void Use() { SdkWidget* w = MakeWidget(); } };
         for e in payload["graph"]["edges"]:
             assert e["source"] in node_ids and e["target"] in node_ids
 
+    def test_every_class_is_reachable_in_large_graph(self, tmp_path):
+        # Over 25 nodes the graph shows only roots initially and reveals
+        # the rest by expanding out-edges. A stand-alone class with no
+        # incoming edge (e.g. Builder30) must still be reachable — it has
+        # to be a root, else clicking can never surface it.
+        src = tmp_path / "src"
+        src.mkdir()
+        # Hub depends on Leaf1..Leaf28 (each gets an in-edge, none a root),
+        # plus two isolated builders that nothing points to.
+        body = "".join(f"class Leaf{i} {{ }};\n" for i in range(1, 29))
+        deps = "".join(f"    Leaf{i}* m{i};\n" for i in range(1, 29))
+        body += f"class Hub {{\n{deps}}};\n"
+        body += "class Builder30 { public: void Run(); };\n"
+        body += "class Builder31 { public: void Go(); };\n"
+        (src / "big.hxx").write_text(body)
+        db = DBManager(tmp_path / "t.db")
+        db.ensure_tables()
+        ScannerAgent(llm=LLMClient(cache=db), db=db,
+                     reader=SourceReader(str(src), db=db)).run(str(src))
+        g = build_payload(db)["graph"]
+        assert len(g["nodes"]) > 25            # exercises the adaptive branch
+        from collections import defaultdict
+        out = defaultdict(list)
+        for e in g["edges"]:
+            out[e["source"]].append(e["target"])
+        seen = set(g["roots"]); stack = list(g["roots"])
+        while stack:
+            for t in out[stack.pop()]:
+                if t not in seen:
+                    seen.add(t); stack.append(t)
+        missing = {n["id"] for n in g["nodes"]} - seen
+        assert not missing, f"unreachable classes: {sorted(missing)}"
+
     def test_multi_edge_collapses_to_strongest_primary(self, tmp_path):
         payload = build_payload(_scan_fixture(tmp_path))
         edges = [e for e in payload["graph"]["edges"]

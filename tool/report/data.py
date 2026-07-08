@@ -276,17 +276,45 @@ def _build_graph_payload(g, db, roots, label, C, orch_name, utilities, phantoms)
             'evidence': evs,
         })
 
-    def rep(cid):
-        for m in C.nodes[cid].get('members', {label[cid]}):
-            if m in internal:
-                return m
-        return label[cid] if label[cid] in internal else None
-
+    # Initial-visible roots. The graph only ever reveals a node by
+    # expanding one of its in-edge sources, so the root set MUST make
+    # every node reachable — otherwise a class with no incoming edge that
+    # isn't a root (e.g. a stand-alone Builder) can never be shown, no
+    # matter how much the user clicks. Roots = every in-degree-0 source;
+    # then add a representative for any pure-cycle / isolated component
+    # that the sources don't reach.
     if len(internal) <= 25:
         root_qnames = list(internal)
     else:
-        root_qnames = [q for q in (rep(r) for r in roots
-                                   if len(_children(C, r)) > 0) if q]
+        succ = defaultdict(list)
+        indeg = {n: 0 for n in internal}
+        for (s, t) in pair:
+            succ[s].append(t)
+            indeg[t] += 1
+        root_qnames = [n for n in internal if indeg[n] == 0]
+        reached = set(root_qnames)
+        stack = list(root_qnames)
+        while stack:
+            x = stack.pop()
+            for t in succ[x]:
+                if t not in reached:
+                    reached.add(t)
+                    stack.append(t)
+        # anything still unreached lives in a cycle with no source — pick
+        # deterministically the member with the most out-edges as its entry.
+        for n in sorted(internal - reached,
+                        key=lambda n: (-len(succ[n]), n)):
+            if n in reached:
+                continue
+            root_qnames.append(n)
+            reached.add(n)
+            stack = [n]
+            while stack:
+                x = stack.pop()
+                for t in succ[x]:
+                    if t not in reached:
+                        reached.add(t)
+                        stack.append(t)
 
     return {'nodes': nodes, 'edges': edges, 'roots': root_qnames}
 
