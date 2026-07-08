@@ -194,6 +194,9 @@ _HTML = r"""<!DOCTYPE html>
     <span class="hint">Click a node to expand · drag any node to rearrange · scroll to zoom</span>
     <button id="rel-reset" style="float:right;font-size:11px;padding:3px 10px;cursor:pointer;
             border:1px solid var(--line);background:#fff;border-radius:4px;">Reset layout</button>
+    <input id="rel-search" type="search" placeholder="Find a class…" autocomplete="off"
+           style="float:right;font-size:12px;padding:3px 10px;margin-right:8px;width:200px;
+                  border:1px solid var(--line);background:#fff;border-radius:4px;">
   </h2>
   <div class="legend">
     <span><b>△</b> inherits</span><span><b>┄△</b> implements</span>
@@ -416,6 +419,42 @@ function makeGraph(containerId, edgePred){
     }).run();
     refresh(true);
   };
+
+  // Search: on a large project only the top-level roots are visible at
+  // first, so a deep class (e.g. PostGraphAcrossIterDataExtractor, 6
+  // levels under a root) looks "missing". Typing its name finds it,
+  // expands the shortest root→node path so every hop is revealed, then
+  // centres and highlights it.
+  function pathFromRoot(target){
+    // BFS over out-edges from all roots; reconstruct predecessors.
+    const prev = new Map(); const q = [...roots]; roots.forEach(r=>prev.set(r,null));
+    while(q.length){
+      const x = q.shift();
+      if(x===target) break;
+      for(const t of (out[x]||[])){ if(!prev.has(t)){ prev.set(t,x); q.push(t); } }
+    }
+    if(!prev.has(target)) return null;
+    const path=[]; let c=target;
+    while(c!==null){ path.unshift(c); c=prev.get(c); }
+    return path;
+  }
+  const searchBox = document.getElementById('rel-search');
+  if(searchBox) searchBox.addEventListener('change', ()=>{
+    const q = searchBox.value.trim().toLowerCase();
+    if(!q) return;
+    const hit = nodes.find(n =>
+      (n.label||'').toLowerCase()===q || (n.qname||n.id).toLowerCase()===q) ||
+      nodes.find(n => (n.label||n.id).toLowerCase().includes(q));
+    if(!hit) return;
+    const path = pathFromRoot(hit.id);
+    if(path){ path.forEach(id=>{ if(hasOut(id)) expanded.add(id); }); }
+    refresh(false);
+    const el = cy.getElementById(hit.id);
+    if(el && el.length){
+      cy.nodes().removeClass('hl'); el.addClass('hl');
+      cy.animate({center:{eles:el}, zoom:1.1}, {duration:350, easing:'ease-out'});
+    }
+  });
 
   refresh(false);
 }
