@@ -63,6 +63,25 @@ public:
         assert "Helper" in targets      # static call inside a pointer-return method
         assert "Widget" in targets      # local inside it
 
+    def test_out_of_line_methods_are_not_double_counted(self, tmp_path):
+        # A method is declared in the .hxx (NS::Foo::bar) and DEFINED out of
+        # line in the .cxx as `Foo::bar` (namespace dropped). The two must
+        # collapse to ONE method entity under the full name — not count as
+        # two — and no bare `Foo` class/method may linger.
+        (tmp_path / "F.hxx").write_text(
+            "namespace NS {\nclass Foo {\npublic:\n"
+            "    void bar();\n    void baz();\n};\n}\n")
+        (tmp_path / "F.cxx").write_text(
+            '#include "F.hxx"\n'
+            "void NS::Foo::bar() { }\n"
+            "void Foo::baz() { }\n")          # out-of-line, namespace dropped
+        ents, _, _ = parse_project(str(tmp_path), cache=None)
+        bar = [e for e in ents if e.kind == "method" and e.name == "bar"]
+        baz = [e for e in ents if e.kind == "method" and e.name == "baz"]
+        assert len(bar) == 1 and bar[0].qualified_name == "NS::Foo::bar"
+        assert len(baz) == 1 and baz[0].qualified_name == "NS::Foo::baz"
+        assert not any(e.qualified_name == "Foo" for e in ents)   # no bare class
+
     def test_member_calls_are_not_mined(self, tmp_path):
         # m_engine->Start() is coupling ALREADY captured by the field edge;
         # mining it again would double-count. The body miner must skip it.

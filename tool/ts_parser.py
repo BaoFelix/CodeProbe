@@ -829,7 +829,7 @@ def _ancestor_types(node):
 # v8: match pointer/reference-returning methods (Graph* Foo::bar()) —
 #     their function_declarator is wrapped in pointer/reference_declarator,
 #     so signatures + body-call edges were being dropped for all of them.
-PARSER_VERSION = 8
+PARSER_VERSION = 9
 
 
 _CPP_EXTS = {'.h', '.hxx', '.hpp', '.cxx', '.cpp', '.c'}
@@ -1160,38 +1160,50 @@ def parse_project(root_dir, exclude_vendored=True, cache=None, workers=None):
                    'reason': 'declaration not seen, inferred from out-of-line methods'},
         ))
 
-    # ── deduplicate bare vs namespaced classes ──────────────────
-    # The SAME class is often parsed twice: once fully-qualified from its
-    # .hxx (UGS::SimulationPost::Foo), and once BARE from a .cxx that uses
-    # `using namespace` for its out-of-line methods, or from a .sch schema.
-    # Left unmerged, the bare copies form a spurious "(root)" module and
-    # their edges never attach to the real node. Merge each bare class into
-    # its UNIQUE namespaced counterpart (skip when the short name is
-    # ambiguous — safer to leave it than guess).
+    # ── deduplicate bare vs fully-qualified entities ────────────
+    # The SAME entity is often parsed twice: fully-qualified from its .hxx
+    # (UGS::SimulationPost::Foo, or ...Foo::bar for a method), and BARE from
+    # a .cxx out-of-line definition written `Foo::bar` / `Outer::Inner`
+    # without the enclosing namespace (or from a .sch schema). Left
+    # unmerged: bare CLASSES form a spurious "(root)" module, bare NESTED
+    # classes look like separate top-scope types, and every METHOD
+    # double-counts (declaration + out-of-line definition under different
+    # qualified names). Merge each bare entity into its UNIQUE
+    # fully-qualified counterpart of the same kind — one whose qualified
+    # name has more :: segments and ends with exactly the bare name.
     class_kinds = ('class', 'struct', 'interface')
-    by_short = {}
+    mergeable = class_kinds + ('method', 'field')
+
+    # index full names by (kind, last-segment) for cheap suffix lookup.
+    by_tail = {}
     for e in all_entities:
-        if e.kind in class_kinds and '::' in e.qualified_name:
-            by_short.setdefault(e.qualified_name.split('::')[-1], []).append(e)
+        if e.kind in mergeable:
+            by_tail.setdefault((e.kind, e.qualified_name.split('::')[-1]),
+                               set()).add(e.qualified_name)
+
     rename = {}                       # bare qualified_name -> full qualified_name
     for e in all_entities:
-        if e.kind in class_kinds and '::' not in e.qualified_name:
-            cands = by_short.get(e.qualified_name, [])
-            if len(cands) == 1:
-                survivor = cands[0]
-                rename[e.qualified_name] = survivor.qualified_name
-                # If the bare copy was REAL (a .sch schema, or a concrete
-                # definition), the survivor must not stay a phantom —
-                # otherwise the report would hide a real class.
-                if not (e.attrs or {}).get('phantom'):
-                    survivor.attrs.pop('phantom', None)
-                    survivor.attrs.pop('reason', None)
+        if e.kind not in mergeable:
+            continue
+        q = e.qualified_name
+        qs = q.split('::')
+        cands = [fq for fq in by_tail.get((e.kind, qs[-1]), ())
+                 if fq != q and fq.split('::')[-len(qs):] == qs]
+        if len(set(cands)) == 1:
+            rename[q] = cands[0]
+    # collapse chains (bare -> mid -> full) so everything lands on the tip.
+    for k in list(rename):
+        seen = {k}
+        v = rename[k]
+        while v in rename and v not in seen:
+            seen.add(v)
+            v = rename[v]
+        rename[k] = v
+
     if rename:
-        deduped_removed = len(rename)
-        all_entities = [e for e in all_entities
-                        if not (e.kind in class_kinds
-                                and e.qualified_name in rename)]
-        for e in all_entities:        # re-home orphaned children
+        for e in all_entities:        # rewrite own name + parent link
+            if e.qualified_name in rename:
+                e.qualified_name = rename[e.qualified_name]
             if e.parent_qname in rename:
                 e.parent_qname = rename[e.parent_qname]
         for r in all_relationships:   # redirect edges onto the real node
@@ -1199,6 +1211,29 @@ def parse_project(root_dir, exclude_vendored=True, cache=None, workers=None):
                 r.source_qname = rename[r.source_qname]
             if r.target_qname in rename:
                 r.target_qname = rename[r.target_qname]
+
+        # Collapse entities that now share (qualified_name, kind) — the .hxx
+        # declaration and the .cxx out-of-line definition. Keep the richest
+        # copy: a REAL beats a phantom, then the LARGEST line span (the
+        # out-of-line body, so get_source still returns the implementation).
+        def _rank(e):
+            span = (e.end_line or 0) - (e.start_line or 0)
+            return (0 if (e.attrs or {}).get('phantom') else 1, span)
+        best = {}
+        for e in all_entities:
+            key = (e.qualified_name, e.kind)
+            if key not in best or _rank(e) > _rank(best[key]):
+                best[key] = e
+        # a survivor is REAL if ANY of its copies was real
+        real_keys = {(e.qualified_name, e.kind) for e in all_entities
+                     if not (e.attrs or {}).get('phantom')}
+        for key, e in best.items():
+            if key in real_keys and (e.attrs or {}).get('phantom'):
+                e.attrs.pop('phantom', None)
+                e.attrs.pop('reason', None)
+        deduped_removed = len(all_entities) - len(best)
+        all_entities = list(best.values())
+
         seen_edges, merged = set(), []
         for r in all_relationships:   # the two copies may share edges
             key = (r.source_qname, r.target_qname or r.target_name, r.kind,
