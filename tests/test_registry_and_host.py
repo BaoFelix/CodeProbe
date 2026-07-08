@@ -79,6 +79,32 @@ class TestScanIdempotency:
         assert "No relationships" in out or "Engine --" not in out
 
 
+class TestDescribeClass:
+    """Detailed per-class profile + scope-aware name resolution — the raw
+    material for 'compare class A vs B' questions the chat could not answer."""
+
+    def test_profile_has_methods_fields_and_neighbours(self, scanned_ctx):
+        registry = build_registry(scanned_ctx)
+        out = run_tool(registry, "describe_class", {"name": "Vehicle"},
+                       scanned_ctx)
+        assert "Vehicle" in out
+        assert "methods (" in out and "fields (" in out
+        assert "depends on" in out            # its collaborators, grounded
+
+    def test_short_name_resolves_without_full_scope(self, scanned_ctx):
+        # 'Workshop' (real: Garage::Workshop) must resolve from the short name.
+        registry = build_registry(scanned_ctx)
+        out = run_tool(registry, "describe_class", {"name": "Workshop"},
+                       scanned_ctx)
+        assert "Garage::Workshop" in out and "No class matches" not in out
+
+    def test_unknown_class_is_a_message_not_a_crash(self, scanned_ctx):
+        registry = build_registry(scanned_ctx)
+        out = run_tool(registry, "describe_class", {"name": "Nonexistent"},
+                       scanned_ctx)
+        assert "No class matches" in out
+
+
 class TestModuleDependencies:
     """'Module A depends on B N times — what are the N?' is a module-level
     question SQL cannot answer (modules aren't a DB column). The dedicated

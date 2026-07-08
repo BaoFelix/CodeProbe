@@ -24,6 +24,7 @@ Contract (stable — other modules depend on these shapes):
 Every handler returns a plain string — the text fed back to the LLM (or shown
 to the user). Strings keep the contract trivial and provider-agnostic.
 """
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -155,6 +156,93 @@ def _list_classes(ctx, limit=200):
     return out
 
 
+def _resolve_class(ctx, name):
+    """Map a possibly-short class name to full scoped qualified name(s).
+
+    Class names collide across namespaces (e.g. two ResultProbeDeleter), so
+    a bare short name can be ambiguous — the scope IS load-bearing. Return
+    ALL matches and let the caller disambiguate: exact full qname -> [it];
+    exact short name -> every class with it; then scoped-suffix, then
+    substring. Empty list = no such class.
+    """
+    name = (name or "").strip()
+    if not name:
+        return []
+    qnames = [c["qualified_name"] for c in (dict(r) for r in ctx.db.get_classes())]
+    if name in qnames:
+        return [name]
+    low = name.lower()
+    short = [q for q in qnames if q.split("::")[-1].lower() == low]
+    if short:
+        return short
+    suf = [q for q in qnames if q.lower().endswith("::" + low)]
+    if suf:
+        return suf
+    return [q for q in qnames if low in q.lower()]
+
+
+def _describe_class(ctx, name):
+    """Full grounded profile of ONE class for detailed / comparison analysis:
+    kind, file, size, methods, fields, base classes, subclasses, what it
+    uses and who uses it. Scope-aware: resolves a short name, and if it is
+    ambiguous returns the scoped candidates instead of guessing."""
+    matches = _resolve_class(ctx, name)
+    if not matches:
+        return f"No class matches '{name}'. Use list_classes to see names."
+    if len(matches) > 1:
+        return (f"'{name}' is ambiguous — {len(matches)} classes share that "
+                f"name; ask again with the full scoped name:\n"
+                + "\n".join(f"  - {m}" for m in matches))
+    q = matches[0]
+    row = ctx.db.get_entity(q)
+    if not row:
+        return f"'{q}' has no definition in scope (external or forward-declared)."
+    attrs = json.loads(row["attrs"] or "{}")
+    kind = row["kind"]
+    loc = (row["end_line"] or 0) - (row["start_line"] or 0)
+    # A method appears twice — the .hxx declaration and the .cxx definition
+    # (the out-of-line body is written `Class::m` without the namespace, so
+    # its qualified_name differs). Collapse by short name so the count is the
+    # real method count, not double.
+    methods = sorted({r["name"] for r in
+                      ctx.db.get_entities(kind="method", parent_qname=q)})
+    fields = sorted({r["name"] for r in
+                     ctx.db.get_entities(kind="field", parent_qname=q)})
+    out = [dict(r) for r in ctx.db.get_relationships(source_qname=q)]
+    inc = [dict(r) for r in ctx.db.get_relationships(target_qname=q)]
+    inh = lambda k: k in ("inherits", "implements")
+    bases = sorted({(r["target_qname"] or r["target_name"]) for r in out if inh(r["kind"])})
+    subs = sorted({r["source_qname"] for r in inc if inh(r["kind"])})
+    uses_int = sorted({r["target_qname"] for r in out if not inh(r["kind"]) and r["target_qname"]})
+    uses_ext = sorted({r["target_name"] for r in out if not inh(r["kind"]) and not r["target_qname"]})
+    usedby = sorted({r["source_qname"] for r in inc if not inh(r["kind"])})
+
+    def shorts(qs, n=20):
+        return ", ".join(x.split("::")[-1] for x in qs[:n]) + (" …" if len(qs) > n else "")
+
+    tag = {"interface": " «interface»", "struct": " «struct»"}.get(kind, "")
+    L = [q, f"  kind: {kind}{tag}"]
+    if row["file_path"]:
+        L.append(f"  defined: {Path(row['file_path']).name}:{row['start_line']} "
+                 f"(~{loc} lines)")
+    if attrs.get("phantom"):
+        L.append("  ! phantom: declaration never seen (inferred from .cxx methods)")
+    L.append(f"  methods ({len(methods)}): {shorts(methods, 30)}"
+             if methods else "  methods (0)")
+    L.append(f"  fields ({len(fields)}): {shorts(fields, 30)}"
+             if fields else "  fields (0)")
+    if bases:
+        L.append(f"  inherits/implements: {shorts(bases)}")
+    if subs:
+        L.append(f"  subclasses ({len(subs)}): {shorts(subs)}")
+    ext = f"; +{len(uses_ext)} external SDK types" if uses_ext else ""
+    L.append(f"  depends on {len(uses_int)} internal class(es): {shorts(uses_int)}{ext}"
+             if uses_int else f"  depends on 0 internal classes{ext}")
+    L.append(f"  used by {len(usedby)} internal class(es): {shorts(usedby)}"
+             if usedby else "  used by 0 internal classes")
+    return "\n".join(L)
+
+
 def _get_relationships(ctx, class_qname="", limit=200, direction="outgoing"):
     """Relationships, optionally for one class. Each line carries the
     relationship kind and evidence location — the grounding the caller
@@ -167,6 +255,14 @@ def _get_relationships(ctx, class_qname="", limit=200, direction="outgoing"):
     Reverse queries only see INTERNAL callers (a resolved source_qname);
     external SDK code that uses the class is not in scope."""
     cq = class_qname or None
+    if cq:
+        matches = _resolve_class(ctx, cq)
+        if len(matches) > 1:
+            return (f"'{class_qname}' is ambiguous — {len(matches)} classes "
+                    f"share that name; pass the full scoped name:\n"
+                    + "\n".join(f"  - {m}" for m in matches))
+        if matches:
+            cq = matches[0]
     if not cq:
         rows = ctx.db.get_relationships()
     elif direction == "incoming":
@@ -540,13 +636,27 @@ def build_registry(ctx: ToolContext) -> dict:
                  "List relationships (optionally for one class), each with "
                  "kind and file:line evidence. direction=outgoing (what the "
                  "class uses, default), incoming (who uses the class — reverse "
-                 "dependents), or both.",
+                 "dependents), or both. Short class names are resolved; an "
+                 "ambiguous name returns the scoped candidates.",
                  _obj({"class_qname": {"type": "string",
-                                       "description": "filter by this class"},
+                                       "description": "class name (short or scoped)"},
                        "direction": {"type": "string",
                                      "description": "outgoing|incoming|both"},
                        "limit": {"type": "integer"}}),
                  _get_relationships),
+        ToolSpec("describe_class",
+                 "Full profile of ONE class for detailed analysis or "
+                 "comparing two classes: kind, file, size (lines), its "
+                 "methods and fields, base classes, subclasses, what it "
+                 "depends on and who depends on it — all grounded in the DB. "
+                 "Use this (once per class) to analyze or compare specific "
+                 "classes. Scope-aware: give a short name; if it collides "
+                 "across namespaces the tool returns the scoped candidates so "
+                 "you pick the right one. Requires a scan.",
+                 _obj({"name": {"type": "string",
+                                "description": "class name (short or full scoped)"}},
+                      ["name"]),
+                 _describe_class),
         ToolSpec("architecture_audit",
                  "Architecture-level health check: groups classes into "
                  "modules and finds structural problems (module cycles, god "
