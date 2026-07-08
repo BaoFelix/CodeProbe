@@ -104,6 +104,26 @@ class TestDescribeClass:
                        scanned_ctx)
         assert "No class matches" in out
 
+    def test_name_forms_resolve_to_one_canonical_class(self, scanned_ctx):
+        from tool.tools import _resolve_class
+        # short, scoped, and the file/underscore form all land on the same
+        # fully-qualified class.
+        full = "Garage::Workshop"
+        for form in ("Workshop", "Garage::Workshop", "Garage_Workshop"):
+            assert _resolve_class(scanned_ctx, form) == [full], form
+
+    def test_get_source_returns_real_class_text(self, scanned_ctx):
+        registry = build_registry(scanned_ctx)
+        out = run_tool(registry, "get_source", {"name": "Engine"}, scanned_ctx)
+        assert "class Engine" in out and "Engine.hxx:" in out
+
+    def test_get_source_file_range(self, scanned_ctx):
+        registry = build_registry(scanned_ctx)
+        out = run_tool(registry, "get_source",
+                       {"file": "Engine.hxx", "start": 1, "end": 3},
+                       scanned_ctx)
+        assert "Engine.hxx:1-" in out
+
 
 class TestModuleDependencies:
     """'Module A depends on B N times — what are the N?' is a module-level

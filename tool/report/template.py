@@ -207,6 +207,7 @@ _HTML = r"""<!DOCTYPE html>
     <span><b>→</b> associates</span><span><b>┄→</b> depends</span>
     <span class="hint">(own classes only — external SDK hidden)</span>
   </div>
+  <div id="rel-hint" class="hint" style="margin:4px 0 0;min-height:1.2em"></div>
   <div class="graph" id="cy-rel"></div>
 </section>
 
@@ -302,6 +303,32 @@ function disp(n){
   let s = (st ? st+'\n' : '') + n.label;
   if((n.fan_in||0) >= 5) s += '\n(used by ' + n.fan_in + ')';
   return s;
+}
+
+/* Same name resolution as the chat's describe_class/get_relationships:
+   full name, short name, the file/underscore form (SimulationPost_Foo),
+   or a partial hit all map to the same class. Ambiguous short names return
+   every scoped candidate so the user picks. Returns an array of node ids. */
+function resolveClass(q){
+  q = (q||'').trim().toLowerCase();
+  if(!q) return [];
+  const nodes = DATA.graph.nodes;
+  const qn = n => (n.qname||n.id).toLowerCase();
+  const exact = nodes.filter(n => qn(n)===q).map(n=>n.id);
+  if(exact.length) return exact;
+  const cand = new Set();
+  for(const pat of [/::|_/, /::/]){
+    const qs = q.split(pat).filter(Boolean);
+    if(!qs.length) continue;
+    const key = qs.join('::');
+    for(const n of nodes){
+      const cs = qn(n).split('::');
+      if(cs.slice(-qs.length).join('::') === key) cand.add(n.id);
+    }
+  }
+  if(cand.size) return [...cand];
+  const nn = q.replace(/::/g,'_');
+  return nodes.filter(n => qn(n).replace(/::/g,'_').includes(nn)).map(n=>n.id);
 }
 
 /* Section 3: class relationships as a FOCUS (ego) view.
@@ -414,13 +441,21 @@ function makeGraph(containerId){
   if(resetBtn) resetBtn.onclick = ()=> focusOn(current || start, true);
 
   const searchBox = document.getElementById('rel-search');
+  const hintBox = document.getElementById('rel-hint');
+  function setHint(html){ if(hintBox) hintBox.innerHTML = html; }
   if(searchBox) searchBox.addEventListener('change', ()=>{
-    const q = searchBox.value.trim().toLowerCase();
-    if(!q) return;
-    const hit = G.nodes.find(n =>
-        (n.label||'').toLowerCase()===q || (n.qname||n.id).toLowerCase()===q)
-      || G.nodes.find(n => (n.label||n.id).toLowerCase().includes(q));
-    if(hit) focusOn(hit.id, true);
+    const raw = searchBox.value.trim();
+    if(!raw){ setHint(''); return; }
+    const ids = resolveClass(raw);
+    if(ids.length === 0){ setHint('No class matches “' + esc(raw) + '”.'); return; }
+    if(ids.length === 1){ setHint(''); focusOn(ids[0], true); return; }
+    // ambiguous across scopes — let the user pick the right one
+    setHint('“' + esc(raw) + '” matches several — pick one: ' +
+      ids.slice(0,10).map(id => '<a href="#" data-id="' + esc(id) + '">'
+        + esc(id) + '</a>').join(' · '));
+    if(hintBox) hintBox.querySelectorAll('a').forEach(link=>{
+      link.onclick = e => { e.preventDefault(); setHint(''); focusOn(link.dataset.id, true); };
+    });
   });
 
   focusOn(start, false);

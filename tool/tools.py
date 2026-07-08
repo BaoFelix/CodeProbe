@@ -25,6 +25,7 @@ Every handler returns a plain string — the text fed back to the LLM (or shown
 to the user). Strings keep the contract trivial and provider-agnostic.
 """
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -157,28 +158,47 @@ def _list_classes(ctx, limit=200):
 
 
 def _resolve_class(ctx, name):
-    """Map a possibly-short class name to full scoped qualified name(s).
+    """Map any class-name form to full scoped qualified name(s).
 
+    Accepts the full name (UGS::SimulationPost::Foo), a bare short name
+    (Foo), the file/underscore form (SimulationPost_Foo, CaeSim_CaePost_Foo),
+    or a partial hit — all normalize to the one canonical qualified name.
     Class names collide across namespaces (e.g. two ResultProbeDeleter), so
-    a bare short name can be ambiguous — the scope IS load-bearing. Return
-    ALL matches and let the caller disambiguate: exact full qname -> [it];
-    exact short name -> every class with it; then scoped-suffix, then
-    substring. Empty list = no such class.
+    the scope IS load-bearing: we return ALL matches at the most specific
+    tier that hits, and the caller asks the user to choose when >1.
+
+    Tiers: (1) exact full qname; (2) trailing-segment match — the query's
+    segments (split on :: or _) are the tail of the qname's :: segments, so
+    a short name matches on the class name and a scoped/underscore form
+    matches deeper; (3) substring fallback.
     """
     name = (name or "").strip()
     if not name:
         return []
     qnames = [c["qualified_name"] for c in (dict(r) for r in ctx.db.get_classes())]
-    if name in qnames:
-        return [name]
     low = name.lower()
-    short = [q for q in qnames if q.split("::")[-1].lower() == low]
-    if short:
-        return short
-    suf = [q for q in qnames if q.lower().endswith("::" + low)]
-    if suf:
-        return suf
-    return [q for q in qnames if low in q.lower()]
+
+    exact = [q for q in qnames if q.lower() == low]
+    if exact:
+        return exact
+
+    csegs = {q: q.lower().split("::") for q in qnames}
+    cand = set()
+    # split the query two ways so an underscore that joins scopes
+    # (SimulationPost_Foo) and one that is literally in a class name are
+    # both honoured.
+    for pattern in (r"::|_", r"::"):
+        qs = [p for p in re.split(pattern, low) if p]
+        if not qs:
+            continue
+        for q, cs in csegs.items():
+            if cs[-len(qs):] == qs:
+                cand.add(q)
+    if cand:
+        return sorted(cand)
+
+    nn = low.replace("::", "_")
+    return sorted(q for q in qnames if nn in q.lower().replace("::", "_"))
 
 
 def _describe_class(ctx, name):
@@ -241,6 +261,83 @@ def _describe_class(ctx, name):
     L.append(f"  used by {len(usedby)} internal class(es): {shorts(usedby)}"
              if usedby else "  used by 0 internal classes")
     return "\n".join(L)
+
+
+def _get_source(ctx, name="", file="", start=0, end=0):
+    """Return actual SOURCE CODE — the DB has structure/metadata, this reads
+    the real text on demand. Three ways to ask:
+      · name="Class"          → that class's definition (its declaration span)
+      · name="Class::method"  → that method's body (the largest span found —
+                                the .cxx definition, not the .hxx signature)
+      · file="Foo.hxx"        → the whole file, or lines start..end if given
+    Only files already in the scanned project are readable. Output is capped
+    at 300 lines; ask for a line range on a big file."""
+    MAX = 300
+    path = a = b = header = None
+
+    if name:
+        cls = _resolve_class(ctx, name)
+        if len(cls) > 1:
+            return (f"'{name}' is ambiguous — pass the full scoped name:\n"
+                    + "\n".join(f"  - {m}" for m in cls))
+        if len(cls) == 1:
+            row = ctx.db.get_entity(cls[0])
+            if not row or not row["file_path"]:
+                return f"'{cls[0]}' has no source in scope (external/forward-declared)."
+            path, a, b, header = row["file_path"], row["start_line"], row["end_line"], cls[0]
+        elif "::" in name:                      # Class::method
+            cq, _, mem = name.rpartition("::")
+            cm = _resolve_class(ctx, cq)
+            if len(cm) > 1:
+                return (f"'{cq}' is ambiguous — pass the full scoped name:\n"
+                        + "\n".join(f"  - {m}" for m in cm))
+            if len(cm) == 1:
+                ms = [dict(r) for r in ctx.db.get_entities(kind="method", parent_qname=cm[0])
+                      if r["name"].lower() == mem.lower()]
+                if ms:
+                    best = max(ms, key=lambda m: (m["end_line"] or 0) - (m["start_line"] or 0))
+                    path, a, b = best["file_path"], best["start_line"], best["end_line"]
+                    header = f"{cm[0]}::{best['name']}"
+        if not path:
+            return f"No class or method matches '{name}'. Try describe_class or list_classes."
+
+    elif file:
+        files = sorted({r["file_path"] for r in ctx.db.get_entities() if r["file_path"]})
+        fl = file.lower()
+        hit = [f for f in files if Path(f).name.lower() == fl] \
+            or [f for f in files if f.lower().endswith(fl)] \
+            or [f for f in files if fl in f.lower()]
+        hit = sorted(set(hit))
+        if not hit:
+            return f"No scanned source file matches '{file}'."
+        if len(hit) > 1:
+            return "Several files match — be more specific:\n" + \
+                   "\n".join(f"  - {Path(h).name}" for h in hit)
+        path = hit[0]
+        header = Path(path).name
+        a = start or 1
+        b = end or 0
+    else:
+        return "Give a class/method name (name=…) or a file (file=…)."
+
+    content, _ = ctx.reader.read_file(path)
+    if content is None:
+        return f"Could not read {path}."
+    lines = content.splitlines()
+    a = max(1, a or 1)
+    b = (b or len(lines))
+    b = min(b, len(lines))
+    if b < a:
+        b = len(lines)
+    span = lines[a - 1:b]
+    note = ""
+    if len(span) > MAX:
+        span = span[:MAX]
+        note = (f"\n… truncated at {MAX} lines (lines {a}-{a + MAX - 1} of "
+                f"{a}-{b}); ask for a narrower range.")
+    width = len(str(a + len(span) - 1))
+    body = "\n".join(f"{a + i:>{width}}  {ln}" for i, ln in enumerate(span))
+    return f"{header}  —  {Path(path).name}:{a}-{a + len(span) - 1}\n{body}{note}"
 
 
 def _get_relationships(ctx, class_qname="", limit=200, direction="outgoing"):
@@ -657,6 +754,20 @@ def build_registry(ctx: ToolContext) -> dict:
                                 "description": "class name (short or full scoped)"}},
                       ["name"]),
                  _describe_class),
+        ToolSpec("get_source",
+                 "Read ACTUAL SOURCE CODE on demand (describe_class gives "
+                 "metadata; this gives the real text). name='Class' → the "
+                 "class definition; name='Class::method' → that method's "
+                 "body; file='Foo.hxx' with optional start/end → a file or "
+                 "line range. Use when you need to judge the real "
+                 "implementation, not just structure. Capped at 300 lines.",
+                 _obj({"name": {"type": "string",
+                                "description": "Class or Class::method"},
+                       "file": {"type": "string",
+                                "description": "source file name (alternative to name)"},
+                       "start": {"type": "integer"},
+                       "end": {"type": "integer"}}),
+                 _get_source),
         ToolSpec("architecture_audit",
                  "Architecture-level health check: groups classes into "
                  "modules and finds structural problems (module cycles, god "
