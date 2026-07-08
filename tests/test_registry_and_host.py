@@ -65,6 +65,19 @@ class TestScanIdempotency:
         # grounding: kind + file:line evidence in the answer text
         assert "--inherits-->" in rels and ".sch:" in rels
 
+    def test_incoming_direction_finds_reverse_dependents(self, scanned_ctx):
+        registry = build_registry(scanned_ctx)
+        # Engine is used by many classes but depends on nothing → the
+        # reverse view must list dependents, the forward view must not.
+        inc = run_tool(registry, "get_relationships",
+                       {"class_qname": "Engine", "direction": "incoming"},
+                       scanned_ctx)
+        assert "--> Engine" in inc            # others point AT Engine
+        out = run_tool(registry, "get_relationships",
+                       {"class_qname": "Engine", "direction": "outgoing"},
+                       scanned_ctx)
+        assert "No relationships" in out or "Engine --" not in out
+
 
 class TestModuleDependencies:
     """'Module A depends on B N times — what are the N?' is a module-level

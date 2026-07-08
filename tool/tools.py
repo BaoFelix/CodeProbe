@@ -155,14 +155,33 @@ def _list_classes(ctx, limit=200):
     return out
 
 
-def _get_relationships(ctx, class_qname="", limit=200):
+def _get_relationships(ctx, class_qname="", limit=200, direction="outgoing"):
     """Relationships, optionally for one class. Each line carries the
     relationship kind and evidence location — the grounding the caller
-    needs to trust the answer."""
-    rows = ctx.db.get_relationships(source_qname=class_qname or None)
+    needs to trust the answer.
+
+    direction (only meaningful with class_qname):
+      · "outgoing" (default) — what the class depends on / uses.
+      · "incoming"           — who depends on / uses the class (reverse).
+      · "both"               — both sets, labelled.
+    Reverse queries only see INTERNAL callers (a resolved source_qname);
+    external SDK code that uses the class is not in scope."""
+    cq = class_qname or None
+    if not cq:
+        rows = ctx.db.get_relationships()
+    elif direction == "incoming":
+        rows = ctx.db.get_relationships(target_qname=cq)
+    elif direction == "both":
+        rows = (list(ctx.db.get_relationships(source_qname=cq)) +
+                list(ctx.db.get_relationships(target_qname=cq)))
+    else:
+        rows = ctx.db.get_relationships(source_qname=cq)
     if not rows:
-        where = f" for {class_qname}" if class_qname else ""
-        return f"No relationships{where}. Run scan_source first."
+        where = f" for {class_qname} ({direction})" if cq else ""
+        hint = ("" if not cq else
+                " (nobody internal depends on it — external SDK callers are "
+                "out of scope)" if direction == "incoming" else "")
+        return f"No relationships{where}{hint}. Run scan_source first."
     lines = []
     for r in rows[:limit]:
         tgt = r["target_qname"] or r["target_name"]
@@ -519,9 +538,13 @@ def build_registry(ctx: ToolContext) -> dict:
                  _obj({"limit": {"type": "integer"}}), _list_classes),
         ToolSpec("get_relationships",
                  "List relationships (optionally for one class), each with "
-                 "kind and file:line evidence.",
+                 "kind and file:line evidence. direction=outgoing (what the "
+                 "class uses, default), incoming (who uses the class — reverse "
+                 "dependents), or both.",
                  _obj({"class_qname": {"type": "string",
-                                       "description": "filter by source class"},
+                                       "description": "filter by this class"},
+                       "direction": {"type": "string",
+                                     "description": "outgoing|incoming|both"},
                        "limit": {"type": "integer"}}),
                  _get_relationships),
         ToolSpec("architecture_audit",

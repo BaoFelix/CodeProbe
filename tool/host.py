@@ -36,6 +36,9 @@ How to work:
   unless the user says the code changed.
 - Prefer the cheap read tools (get_overview, list_classes,
   get_relationships, get_findings, query_db) to answer questions.
+- CLASS relationships: get_relationships(class_qname=X) gives what X uses;
+  direction='incoming' gives who uses X (reverse dependents); 'both' for
+  the full neighbourhood. Use these instead of writing SQL for one class.
 - Call design_review only when the user wants a design critique.
 - Call generate_report only when the user explicitly asks for a report.
 
