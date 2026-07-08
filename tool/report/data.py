@@ -43,13 +43,18 @@ def build_payload(db):
     relationships = [_rel(r) for r in db.get_relationships()]
 
     g = build_graph(entities, relationships)
-    h, rep = fold_abstractions(g, mode='leaves')
-    C, label = condense(h)
-    roots = sorted(find_roots(C),
-                   key=lambda r: len(nx.descendants(C, r)), reverse=True)
 
     orchestrator = (db.get_module_info() or {})
     orch_name = _get(orchestrator, 'orchestrator')
+
+    # The orchestrator is the workflow's headline — never fold it into a
+    # base class it merely subclasses (it would vanish behind a '+N impls'
+    # tag on that base). Same rule as utilities.discard(orch_name) below.
+    protect = {orch_name} if orch_name else frozenset()
+    h, rep = fold_abstractions(g, mode='leaves', protect=protect)
+    C, label = condense(h)
+    roots = sorted(find_roots(C),
+                   key=lambda r: len(nx.descendants(C, r)), reverse=True)
     utilities = {n for n in g.nodes if classify_utility(g, n)}
     # A CRTP core (everyone inherits it, it depends on nothing) matches
     # the utility shape too — the orchestrator must never render as a

@@ -262,7 +262,7 @@ def _parent_map(g):
     return parent
 
 
-def _representative_map(g, mode='leaves'):
+def _representative_map(g, mode='leaves', protect=frozenset()):
     """Map each class to the node that represents it after folding.
 
     mode='none'   → {} : no folding, every class stays itself.
@@ -272,6 +272,11 @@ def _representative_map(g, mode='leaves'):
     mode='all'    → fold every class onto its top-most base (Geom_Circle
                     → Geom_Geometry). Good for shallow polymorphic code,
                     too aggressive for deep type hierarchies.
+
+    protect: qnames that must NEVER be folded away — they stay their own
+    node. The orchestrator lives here: it is the headline of the workflow,
+    so burying it into a base class it happens to subclass (shown only as
+    a '+N impls' annotation) would hide the most important node.
     """
     if mode == 'none':
         return {}
@@ -285,10 +290,13 @@ def _representative_map(g, mode='leaves'):
         # marginal base.
         child_count = Counter(parent.values())
         return {child: par for child, par in parent.items()
-                if child not in has_children and child_count[par] >= 2}
+                if child not in has_children and child_count[par] >= 2
+                and child not in protect}
     # mode == 'all'
     rep = {}
     for n in list(parent):
+        if n in protect:
+            continue
         cur, seen = n, {n}
         while cur in parent and parent[cur] not in seen:
             cur = parent[cur]
@@ -297,7 +305,7 @@ def _representative_map(g, mode='leaves'):
     return rep
 
 
-def fold_abstractions(g, mode='leaves'):
+def fold_abstractions(g, mode='leaves', protect=frozenset()):
     """Collapse subtypes onto a representative base so a family of
     implementations shows as one node that absorbs their outgoing
     structure. Removes the swarm of in-degree-0 polymorphic leaves that
@@ -310,7 +318,7 @@ def fold_abstractions(g, mode='leaves'):
     Returns (folded_graph, rep_map). Each folded node carries a 'members'
     set listing the originals it represents.
     """
-    rep = _representative_map(g, mode)
+    rep = _representative_map(g, mode, protect)
     R = lambda n: rep.get(n, n)
 
     h = nx.DiGraph()

@@ -129,6 +129,29 @@ class TestCondenseLabels:
         assert len(labels) == len(set(labels)), labels   # no collision
 
 
+class TestFoldAbstractions:
+    def test_protected_class_is_not_folded_into_its_base(self):
+        # Base with 3 subclasses → a real family that folds. But if one
+        # subclass is the orchestrator (protected), it must stay its own
+        # node while the other two still fold into Base.
+        from tool.workflow import fold_abstractions
+        g = nx.DiGraph()
+        for c in ("Sub1", "Sub2", "Orch"):
+            g.add_edge(c, "Base", weight=1, kinds={"inherits"}, max_level=5)
+        h, rep = fold_abstractions(g, mode="leaves", protect={"Orch"})
+        assert "Orch" in h.nodes            # survived as its own node
+        assert "Sub1" not in h.nodes        # folded into Base
+        assert rep.get("Sub1") == "Base" and "Orch" not in rep
+
+    def test_without_protection_all_subclasses_fold(self):
+        from tool.workflow import fold_abstractions
+        g = nx.DiGraph()
+        for c in ("Sub1", "Sub2", "Orch"):
+            g.add_edge(c, "Base", weight=1, kinds={"inherits"}, max_level=5)
+        h, _ = fold_abstractions(g, mode="leaves")
+        assert "Orch" not in h.nodes and "Base" in h.nodes
+
+
 class TestClassifyUtility:
     def test_sink_with_fan_in_is_utility(self):
         g = nx.DiGraph([("a", "u"), ("b", "u")])
