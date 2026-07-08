@@ -281,6 +281,15 @@ def _build_graph_payload(g, db, roots, label, C, orch_name, utilities, phantoms)
             'evidence': evs,
         })
 
+    # fan_in = how many distinct internal classes depend on this one. Drives
+    # node size in the report (bigger box = more depended-on = touching it is
+    # riskier), and tells apart a heavily-used hub from a leaf.
+    fanin = defaultdict(int)
+    for (_s, t) in pair:
+        fanin[t] += 1
+    for nd in nodes:
+        nd['fan_in'] = fanin.get(nd['id'], 0)
+
     # Initial-visible roots. The graph only ever reveals a node by
     # expanding one of its in-edge sources, so the root set MUST make
     # every node reachable — otherwise a class with no incoming edge that

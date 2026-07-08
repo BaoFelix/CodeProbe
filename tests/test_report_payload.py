@@ -52,6 +52,16 @@ class TestBuildPayload:
             if isinstance(payload["arch"], list) else set()
         assert "Ghost" not in arch_names
 
+    def test_nodes_carry_fan_in_count(self, tmp_path):
+        # Beta is used by Alpha (by value and by pointer) → one internal
+        # dependent. fan_in drives node size in the ego view.
+        db = _scan_fixture(tmp_path)
+        graph = build_payload(db)["graph"]
+        by = {n["label"]: n for n in graph["nodes"]}
+        assert all("fan_in" in n for n in graph["nodes"])
+        assert by["Beta"]["fan_in"] == 1     # Alpha depends on Beta
+        assert by["Alpha"]["fan_in"] == 0     # nobody depends on Alpha
+
     def test_external_types_hidden_from_graph(self, tmp_path):
         # Gamma references an SDK type never defined in scope (SdkWidget).
         # The relationship is mined, but the report must not render the

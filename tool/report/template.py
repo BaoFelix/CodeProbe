@@ -191,18 +191,21 @@ _HTML = r"""<!DOCTYPE html>
 
 <section>
   <h2>3. Relationships
-    <span class="hint">Click a node to expand · drag any node to rearrange · scroll to zoom</span>
+    <span class="hint">Centred on one class · click any class to re-centre · scroll to zoom</span>
     <button id="rel-reset" style="float:right;font-size:11px;padding:3px 10px;cursor:pointer;
-            border:1px solid var(--line);background:#fff;border-radius:4px;">Reset layout</button>
+            border:1px solid var(--line);background:#fff;border-radius:4px;">Recenter</button>
     <input id="rel-search" type="search" placeholder="Find a class…" autocomplete="off"
            style="float:right;font-size:12px;padding:3px 10px;margin-right:8px;width:200px;
                   border:1px solid var(--line);background:#fff;border-radius:4px;">
   </h2>
   <div class="legend">
+    <span><b>↑ above</b> = its base class + classes that use it</span>
+    <span><b>↓ below</b> = its subclasses + classes it uses</span>
+    <span><b>bigger box</b> = more classes depend on it</span>
     <span><b>△</b> inherits</span><span><b>┄△</b> implements</span>
     <span><b>◆</b> composes</span><span><b>◇</b> aggregates</span>
     <span><b>→</b> associates</span><span><b>┄→</b> depends</span>
-    <span class="hint">(the project's own classes only — external SDK types hidden)</span>
+    <span class="hint">(own classes only — external SDK hidden)</span>
   </div>
   <div class="graph" id="cy-rel"></div>
 </section>
@@ -254,8 +257,13 @@ function umlStyle(){
       'label':'data(disp)','shape':'round-rectangle',
       'background-color':'#eaf1fb','border-width':1.5,'border-color':'#3b82f6',
       'color':'#1f2329','text-valign':'center','text-halign':'center',
-      'font-size':'14px','text-wrap':'wrap','text-max-width':'180px',
-      'padding':'12px','width':'label','height':'label'}},
+      'font-size':'12px','text-wrap':'wrap','text-max-width':'130px',
+      'padding':'8px',
+      // size ∝ how many classes depend on it (data(fanx) is 0..1)
+      'width':'mapData(fanx, 0, 1, 64, 150)',
+      'height':'mapData(fanx, 0, 1, 40, 96)'}},
+    {selector:'node.focus',style:{
+      'background-color':'#dbeafe','border-color':'#1d4ed8','border-width':4}},
     {selector:'node[is_orch = 1]',style:{'background-color':'#fde8e8','border-color':'#dc2626','border-width':2.5}},
     {selector:'node[is_util = 1]',style:{'background-color':'#f1f5f9','border-color':'#94a3b8'}},
     {selector:'node[kind = "interface"]',style:{'background-color':'#eef2ff','border-color':'#6366f1','border-style':'solid'}},
@@ -289,174 +297,133 @@ function umlStyle(){
   ];
 }
 
-function disp(n, prefix){
+function disp(n){
   const st = STEREO[n.kind];
-  return (st ? st+'\n' : '') + prefix + n.label;
+  let s = (st ? st+'\n' : '') + n.label;
+  if((n.fan_in||0) >= 5) s += '\n(used by ' + n.fan_in + ')';
+  return s;
 }
 
-/* Reusable UML graph with expand/collapse.
-   edgePred: which edges to include. */
-function makeGraph(containerId, edgePred){
+/* Section 3: class relationships as a FOCUS (ego) view.
+
+   The whole project is ~200 internal edges — a hairball nobody can read.
+   Instead we centre on ONE class and show only its direct neighbourhood,
+   split into two bands by a single intuitive rule:
+
+     ABOVE the class = things "higher" than it:
+        · its base class(es)            (it inherits/implements them)
+        · the classes that USE it       (they depend on it)
+     BELOW the class = things "lower" (the detail it rests on):
+        · its subclasses               (they inherit it)
+        · the classes it USES          (it depends on them)
+
+   So a base class sits ABOVE its subclasses (the user's expectation),
+   while a caller sits above the helper it calls — both without ever
+   flipping the stored edge (the arrowhead still encodes the real kind).
+   Node size ∝ how many classes depend on it; click any class to re-centre
+   on it, so you follow the chain one clean hop at a time. */
+function makeGraph(containerId){
+  const container = document.getElementById(containerId);
   if (!GRAPH_LIBS_OK){
-    const box = document.getElementById(containerId);
-    if (box) box.innerHTML =
+    if (container) container.innerHTML =
       '<p style="padding:1em;color:var(--muted)">Diagram unavailable ' +
       'offline (graph libraries load from CDN). The workflow tree and ' +
       'design review above/below are complete.</p>';
     return;
   }
   const G = DATA.graph;
-  const edges = G.edges.filter(edgePred);
-  const usedNodes = new Set();
-  edges.forEach(e=>{usedNodes.add(e.source);usedNodes.add(e.target);});
-  // keep root nodes even if they have no edges in this view
-  G.roots.forEach(r=>usedNodes.add(r));
-  const nodes = G.nodes.filter(n=>usedNodes.has(n.id));
-
-  if(nodes.length===0){
-    document.getElementById(containerId).innerHTML='<div class="empty">No relationships to display in this view.</div>';
+  if(!G.nodes.length){
+    container.innerHTML='<div class="empty">No internal class relationships to display.</div>';
     return;
   }
+  const nodeById = {};
+  G.nodes.forEach(n=>nodeById[n.id]=n);
 
-  const out = {};
-  nodes.forEach(n=>out[n.id]=[]);
-  edges.forEach(e=>{ if(out[e.source]) out[e.source].push(e.target); });
-  const hasOut = id => (out[id]||[]).length>0;
-  const expanded = new Set();
-  let roots = G.roots.filter(r=>usedNodes.has(r));
-  if(roots.length===0) roots = nodes.slice(0,12).map(n=>n.id);
+  // Directional neighbour maps encoding the above/below rule.
+  const isInh = k => (k==='inherits' || k==='implements');
+  const above = {}, below = {};
+  G.nodes.forEach(n=>{ above[n.id]=new Set(); below[n.id]=new Set(); });
+  G.edges.forEach(e=>{
+    if(isInh(e.primary)){                 // source = subclass, target = base
+      above[e.source].add(e.target);      // base sits above the subclass
+      below[e.target].add(e.source);      // subclass sits below the base
+    } else {                              // source USES target
+      above[e.target].add(e.source);      // the caller sits above
+      below[e.source].add(e.target);      // the used helper sits below
+    }
+  });
+
+  let maxFan = 1;
+  G.nodes.forEach(n=>{ if((n.fan_in||0) > maxFan) maxFan = n.fan_in; });
 
   const cy = cytoscape({
-    container: document.getElementById(containerId),
+    container,
     elements:{
-      nodes: nodes.map(n=>({data:{...n, disp:disp(n,'')}})),
-      edges: edges.map(e=>({data:{id:e.id,source:e.source,target:e.target,
-                                  primary:e.primary, elabel:(e.kinds||[]).join(', ')}})),
+      nodes: G.nodes.map(n=>({data:{...n, fanx:(n.fan_in||0)/maxFan, disp:disp(n)}})),
+      edges: G.edges.map(e=>({data:{id:e.id, source:e.source, target:e.target,
+                                    primary:e.primary, elabel:(e.kinds||[]).join(', ')}})),
     },
     style: umlStyle(),
     wheelSensitivity:0.2,
   });
 
-  // ── Industry-standard pattern (Obsidian / Sourcegraph / GitHub dep
-  // viewers): lay out ALL nodes ONCE, then toggling only changes
-  // visibility and pans the camera. cose-bilkent is the well-known
-  // anti-overlap successor to plain cose — it spaces nodes so labels
-  // never collide. Nodes are NOT locked: the user can drag any class
-  // wherever they like, and the spatial memory is preserved because
-  // we never re-run a layout after the initial one.
-  cy.layout({
-    name:'cose-bilkent',
-    fit:true, padding:40, animate:false, randomize:true,
-    idealEdgeLength: 140,
-    edgeElasticity: 0.45,
-    nodeRepulsion: 9000,
-    nestingFactor: 0.1,
-    gravity: 0.25,
-    gravityRangeCompound: 1.5,
-    numIter: 2500,
-    tile: true,
-    tilingPaddingVertical: 20,
-    tilingPaddingHorizontal: 20,
-  }).run();
-
-  function visibleSet(){
-    const vis=new Set(roots);
-    let changed=true;
-    while(changed){
-      changed=false;
-      for(const id of [...vis]){
-        if(expanded.has(id)){
-          for(const t of (out[id]||[])){ if(!vis.has(t)){vis.add(t);changed=true;} }
-        }
-      }
-    }
-    return vis;
+  const XGAP = 180, YBAND = 200;
+  function placeRow(ids, y){
+    const x0 = -(Math.max(0, ids.length-1) * XGAP) / 2;
+    ids.forEach((id,i)=> cy.getElementById(id).position({x:x0 + i*XGAP, y}));
   }
 
-  function refresh(animate){
-    const vis=visibleSet();
+  let current = null;
+  function focusOn(id, animate){
+    if(!nodeById[id]) return;
+    current = id;
+    const ab = [...above[id]], bl = [...below[id]];
+    const vis = new Set([id, ...ab, ...bl]);
+    cy.getElementById(id).position({x:0, y:0});
+    placeRow(ab, -YBAND);
+    placeRow(bl,  YBAND);
     cy.batch(()=>{
-      cy.nodes().forEach(n=>{
-        const id=n.id();
-        if(vis.has(id)) n.show(); else n.hide();
-        const pfx = hasOut(id) ? (expanded.has(id)?'[−] ':'[+] ') : '';
-        n.data('disp', disp(n.data(), pfx));
+      cy.nodes().forEach(n=>{ vis.has(n.id()) ? n.show() : n.hide(); });
+      cy.edges().forEach(e=>{
+        (vis.has(e.data('source')) && vis.has(e.data('target'))) ? e.show() : e.hide();
       });
+      cy.nodes().removeClass('focus');
+      cy.getElementById(id).addClass('focus');
     });
-    const visEles = cy.elements(':visible');
-    if(visEles.length===0) return;
-    if(animate){
-      cy.animate({fit:{eles:visEles, padding:40}}, {duration:350, easing:'ease-out'});
-    } else {
-      cy.fit(visEles, 40);
-    }
+    const ve = cy.elements(':visible');
+    if(ve.length===0) return;
+    if(animate) cy.animate({fit:{eles:ve, padding:55}}, {duration:350, easing:'ease-out'});
+    else cy.fit(ve, 55);
     clampZoom(cy);
   }
 
-  cy.on('tap','node',evt=>{
-    const id=evt.target.id();
-    cy.nodes().removeClass('hl'); evt.target.addClass('hl');
-    if(hasOut(id)){
-      if(expanded.has(id)) expanded.delete(id); else expanded.add(id);
-      refresh(true);
-    }
-  });
+  // Click any class to re-centre the view on it (follow the chain).
+  cy.on('tap','node', evt=> focusOn(evt.target.id(), true));
 
-  // Optional reset: re-run the full layout if the user has dragged
-  // nodes into a mess and wants the auto-arrangement back.
-  const resetBtn = document.getElementById('rel-reset');
-  if(resetBtn) resetBtn.onclick = () => {
-    // Layout needs to see every node, so temporarily show all,
-    // re-run, then restore the toggle state.
-    cy.nodes().show();
-    cy.layout({
-      name:'cose-bilkent',
-      fit:true, padding:40, animate:false, randomize:true,
-      idealEdgeLength: 140, nodeRepulsion: 9000,
-      edgeElasticity: 0.45, gravity: 0.25,
-      numIter: 2500, tile: true,
-      tilingPaddingVertical: 20, tilingPaddingHorizontal: 20,
-    }).run();
-    refresh(true);
-  };
-
-  // Search: on a large project only the top-level roots are visible at
-  // first, so a deep class (e.g. PostGraphAcrossIterDataExtractor, 6
-  // levels under a root) looks "missing". Typing its name finds it,
-  // expands the shortest root→node path so every hop is revealed, then
-  // centres and highlights it.
-  function pathFromRoot(target){
-    // BFS over out-edges from all roots; reconstruct predecessors.
-    const prev = new Map(); const q = [...roots]; roots.forEach(r=>prev.set(r,null));
-    while(q.length){
-      const x = q.shift();
-      if(x===target) break;
-      for(const t of (out[x]||[])){ if(!prev.has(t)){ prev.set(t,x); q.push(t); } }
-    }
-    if(!prev.has(target)) return null;
-    const path=[]; let c=target;
-    while(c!==null){ path.unshift(c); c=prev.get(c); }
-    return path;
+  // Default focus: the orchestrator (the story's entry point), else the
+  // most-depended-on class — never an arbitrary node.
+  let start = (DATA.summary.orchestrator && nodeById[DATA.summary.orchestrator])
+              ? DATA.summary.orchestrator : null;
+  if(!start){
+    let best = G.nodes[0];
+    G.nodes.forEach(n=>{ if((n.fan_in||0) > (best.fan_in||0)) best = n; });
+    start = best.id;
   }
+
+  const resetBtn = document.getElementById('rel-reset');
+  if(resetBtn) resetBtn.onclick = ()=> focusOn(current || start, true);
+
   const searchBox = document.getElementById('rel-search');
   if(searchBox) searchBox.addEventListener('change', ()=>{
     const q = searchBox.value.trim().toLowerCase();
     if(!q) return;
-    const hit = nodes.find(n =>
-      (n.label||'').toLowerCase()===q || (n.qname||n.id).toLowerCase()===q) ||
-      nodes.find(n => (n.label||n.id).toLowerCase().includes(q));
-    if(!hit) return;
-    const path = pathFromRoot(hit.id);
-    if(path){ path.forEach(id=>{ if(hasOut(id)) expanded.add(id); }); }
-    refresh(false);
-    const el = cy.getElementById(hit.id);
-    if(el && el.length){
-      cy.nodes().removeClass('hl'); el.addClass('hl');
-      cy.animate({center:{eles:el}, zoom:1.1}, {duration:350, easing:'ease-out'});
-    }
+    const hit = G.nodes.find(n =>
+        (n.label||'').toLowerCase()===q || (n.qname||n.id).toLowerCase()===q)
+      || G.nodes.find(n => (n.label||n.id).toLowerCase().includes(q));
+    if(hit) focusOn(hit.id, true);
   });
 
-  refresh(false);
+  focusOn(start, false);
 }
 
 /* ── Section 1: workflow tree as an indented VSCode-style outline.
@@ -585,7 +552,7 @@ function makeGraph(containerId, edgePred){
 })();
 
 /* Section 3: all relations, UML */
-makeGraph('cy-rel', e=>true);
+makeGraph('cy-rel');
 
 /* Section 4: design review — architecture-level first, then class-level
    (the latter only if the on-demand class review was run). */
