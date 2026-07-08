@@ -66,6 +66,34 @@ class TestScanIdempotency:
         assert "--inherits-->" in rels and ".sch:" in rels
 
 
+class TestModuleDependencies:
+    """'Module A depends on B N times — what are the N?' is a module-level
+    question SQL cannot answer (modules aren't a DB column). The dedicated
+    tool must reproduce the count AND enumerate the backing class edges."""
+
+    def test_matrix_lists_module_edges_with_weight(self, scanned_ctx):
+        registry = build_registry(scanned_ctx)
+        out = run_tool(registry, "module_dependencies", {}, scanned_ctx)
+        assert "Garage" in out and "→" in out and "×" in out
+
+    def test_specific_edge_enumerates_class_evidence(self, scanned_ctx):
+        registry = build_registry(scanned_ctx)
+        out = run_tool(registry, "module_dependencies",
+                       {"from_module": "Garage", "to_module": "(root)"},
+                       scanned_ctx)
+        # exactly the grounded class-level references behind the edge
+        assert "class-level reference" in out
+        assert "-->" in out                       # per-edge evidence lines
+        assert out.count("·") >= 1
+
+    def test_unknown_module_lists_choices(self, scanned_ctx):
+        registry = build_registry(scanned_ctx)
+        out = run_tool(registry, "module_dependencies",
+                       {"from_module": "NoSuchModule",
+                        "to_module": "Garage"}, scanned_ctx)
+        assert "No module matches" in out
+
+
 class TestDesignReviewStaleness:
     """A stored review counts as cached only while the graph is unchanged."""
 

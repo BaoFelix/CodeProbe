@@ -360,6 +360,89 @@ def _architecture_audit(ctx, strategy="auto", verify=False, baseline="off"):
     return prefix + format_findings(findings, mg)
 
 
+def _module_dependencies(ctx, from_module="", to_module="", strategy="auto"):
+    """Deterministic module-level dependency inspector.
+
+    Modules are NOT a DB column — they are computed here from the same
+    grouping the audit uses (folder / namespace / community / explicit
+    groups). This is the ONLY correct way to answer 'module A depends on
+    module B N times — what are the N?': every module edge already carries
+    the underlying class-level references with file:line evidence.
+
+    · No args  → the full module dependency matrix (A → B, weight, kinds).
+    · from+to  → the exact class-level references backing that one edge.
+    """
+    from .architect import run_architecture_audit, load_universal_contract
+    classes = [dict(r) for r in ctx.db.get_classes()]
+    if not classes:
+        return "Nothing to analyze. Run scan_source first."
+    rels = [dict(r) for r in ctx.db.get_relationships()]
+
+    contract = load_universal_contract()
+    groups = None
+    prose = _load_arch_skill()
+    if prose and _llm_ready(ctx):
+        from .architect import RuleCompiler
+        user = RuleCompiler(ctx.llm).compile(prose, classes)
+        contract.rules.extend(user.rules)
+        groups = user.groups or None
+
+    _, mg = run_architecture_audit(
+        classes, rels, strategy=strategy, contract=contract, groups=groups)
+    g = mg.graph
+    names = sorted(g.nodes)
+
+    def resolve(q):
+        # tolerant match: exact (case-insensitive), then suffix, then
+        # substring — so 'Builder/ind', 'builder', 'ind' all land.
+        ql = q.strip().lower()
+        exact = [n for n in names if n.lower() == ql]
+        if exact:
+            return exact
+        suf = [n for n in names if n.lower().endswith(ql) or ql.endswith(n.lower())]
+        if suf:
+            return suf
+        return [n for n in names if ql in n.lower()]
+
+    if not from_module and not to_module:
+        if g.number_of_edges() == 0:
+            return (f"Grouping '{mg.strategy}' produced {len(names)} module(s) "
+                    f"with no cross-module dependencies: {', '.join(names)}")
+        lines = [f"Module dependencies (grouping: {mg.strategy}; "
+                 f"{len(names)} modules). Each row: A → B  weight×  [kinds]"]
+        for s, t, d in sorted(g.edges(data=True),
+                              key=lambda e: (-e[2]["weight"], e[0], e[1])):
+            kinds = ", ".join(sorted(d["kinds"]))
+            lines.append(f"  {s} → {t}   {d['weight']}×   [{kinds}]")
+        lines.append("\nTo see the class-level references behind one edge, "
+                     "call module_dependencies with from_module and to_module.")
+        return "\n".join(lines)
+
+    src = resolve(from_module) if from_module else names
+    dst = resolve(to_module) if to_module else names
+    if from_module and not src:
+        return f"No module matches '{from_module}'. Modules: {', '.join(names)}"
+    if to_module and not dst:
+        return f"No module matches '{to_module}'. Modules: {', '.join(names)}"
+
+    out = []
+    for s in src:
+        for t in dst:
+            if s == t or not g.has_edge(s, t):
+                continue
+            d = g[s][t]
+            out.append(f"{s} → {t}: {d['weight']} class-level "
+                       f"reference(s) [{', '.join(sorted(d['kinds']))}]")
+            for ev in d["evidence"]:
+                out.append(f"    · {ev}")
+    if not out:
+        a = from_module or "(any)"
+        b = to_module or "(any)"
+        return (f"No dependency from module '{a}' to '{b}' under grouping "
+                f"'{mg.strategy}'. Modules: {', '.join(names)}")
+    return "\n".join(out)
+
+
 def _architecture_conclusion(ctx):
     """The coherent, global architecture design conclusion. Runs the
     accumulative agent loop (Tier 2): it REUSES the per-module analyses
@@ -454,6 +537,22 @@ def build_registry(ctx: ToolContext) -> dict:
                                     "description": "off|update|check — CI ratchet: "
                                     "freeze legacy debt, gate only new findings"}}),
                  _architecture_audit),
+        ToolSpec("module_dependencies",
+                 "Deterministic module-level dependency inspector — the "
+                 "correct way to answer 'module A depends on module B N "
+                 "times, what are the N?'. Modules are computed here (folder/"
+                 "namespace/community), NOT stored as a DB column, so plain "
+                 "SQL over entities CANNOT answer module questions. No args → "
+                 "the full module→module dependency matrix; from_module + "
+                 "to_module → the exact class-level references (with file:line) "
+                 "backing that one module edge. No LLM. Requires a scan.",
+                 _obj({"from_module": {"type": "string",
+                                       "description": "source module name (tolerant match)"},
+                       "to_module": {"type": "string",
+                                     "description": "target module name (tolerant match)"},
+                       "strategy": {"type": "string",
+                                    "description": "auto|folder|namespace|community"}}),
+                 _module_dependencies),
         ToolSpec("architecture_conclusion",
                  "The coherent GLOBAL architecture design verdict: an "
                  "accumulative loop weaves the per-module analyses into one "
