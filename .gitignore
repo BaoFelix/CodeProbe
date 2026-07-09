@@ -6,6 +6,3 @@ outputs/*.db
 outputs/*.json
 outputs/*.html
 *.db
-
-# CodeProbe architecture baseline (user commits their own per-project)
-architecture.baseline.json

@@ -57,18 +57,9 @@ class Finding:
     modules: list = field(default_factory=list)
     evidence: list = field(default_factory=list)
     severity: str = "medium"       # "high" | "medium" | "low"
-    subject: list = None           # identity-bearing modules (see key())
-
-    def key(self):
-        """Stable identity for baseline/ratchet comparison across runs.
-
-        Keyed on the KIND and the SUBJECT — the module(s) the finding is
-        ABOUT — not the full display list, evidence lines, or counts.
-        The distinction matters for god_module: its `modules` includes
-        every dependent for display, so keying on that would make one new
-        dependent look like a brand-new violation and break the ratchet;
-        its subject is just the hub itself."""
-        return self.kind + ":" + "+".join(sorted(self.subject or self.modules))
+    subject: list = None           # the module(s) the finding is ABOUT
+                                   # (god_module: just the hub, not every
+                                   # dependent listed in `modules`)
 
 
 def load_universal_contract() -> RuleContract:
